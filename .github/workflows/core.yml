@@ -151,6 +151,9 @@ jobs:
           npm --prefix risk-fork/sdk-qualification audit
       - name: Qualify exact SDK closure, binding, process gates and loopback contract
         run: npm --prefix risk-fork/sdk-qualification test
+      - name: Verify disabled client review writes and recovery on Windows
+        if: runner.os == 'Windows'
+        run: node --test risk-fork/test/client-adoption.test.mjs risk-fork/test/client-review-recovery.test.mjs
 
   postgres-authority:
     runs-on: ubuntu-latest
@@ -275,10 +278,11 @@ jobs:
           persist-credentials: false
       - name: Install only locked upstream core test dependencies
         run: npm --prefix .upstream/risk-fork ci --ignore-scripts --no-audit --no-fund
-      - name: Verify explicit demo and hosted regressions
+      - name: Verify shared source, disabled client review and pinned consumer regressions
         shell: bash
         run: |
           export RISK_FORK_UPSTREAM_CHECKOUT="$GITHUB_WORKSPACE/.upstream"
           export RISK_FORK_HOSTED_BUNDLE="$GITHUB_WORKSPACE/.upstream/risk-fork-hosted-mcp/dist/runtime/index.mjs"
+          node --test risk-fork/test/integration/compatibility-source.test.mjs
           npm --prefix risk-fork run test:integration:demo
           npm --prefix risk-fork run test:integration:hosted
