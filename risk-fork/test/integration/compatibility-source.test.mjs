@@ -2,7 +2,8 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -27,11 +28,33 @@ function canonical(bytes) {
 
 async function exactFile(root, relative) {
   const filename = path.join(root, relative);
-  assert.equal(await realpath(filename), filename, `non-canonical source: ${relative}`);
-  const stat = await lstat(filename);
-  assert.ok(stat.isFile() && !stat.isSymbolicLink(), `non-regular source: ${relative}`);
-  assert.ok(stat.size > 0 && stat.size <= 2 * 1024 * 1024, `unbounded source: ${relative}`);
-  return canonical(await readFile(filename));
+  const handle = await open(filename, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
+  try {
+    const before = await handle.stat({ bigint: true });
+    assert.ok(before.isFile(), `non-regular source: ${relative}`);
+    assert.ok(before.size > 0n && before.size <= 2n * 1024n * 1024n, `unbounded source: ${relative}`);
+    // Read only the opened file and at most its bounded size plus one byte.
+    // Replacing the pathname cannot redirect this read to a different inode.
+    const buffer = Buffer.alloc(Number(before.size) + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    assert.equal(BigInt(length), before.size, `source changed while reading: ${relative}`);
+    const after = await handle.stat({ bigint: true });
+    const currentPath = await lstat(filename, { bigint: true });
+    assert.ok(currentPath.isFile() && !currentPath.isSymbolicLink(), `non-regular source: ${relative}`);
+    for (const field of ['dev', 'ino', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']) {
+      assert.equal(after[field], before[field], `source changed while reading: ${relative}`);
+      assert.equal(currentPath[field], before[field], `source path changed while reading: ${relative}`);
+    }
+    assert.equal(await realpath(filename), filename, `non-canonical source: ${relative}`);
+    return canonical(buffer.subarray(0, length));
+  } finally {
+    await handle.close();
+  }
 }
 
 async function pinnedManifest(root) {
