@@ -38,7 +38,7 @@ The managed-service runtime, hosted MCP package, demo application and private ho
 
 The standalone package does not include the production MCP gateway. The client-adoption CLI's inherited default points to the integrations sibling `mcp/risk-forkd.js`; that path is absent here and fails closed. Supply a separately reviewed gateway with `--gateway <absolute-path>` and `--gateway-sha256 <exact-sha256>` when planning a host integration. Test fixtures are for tests, not installation targets. See [client adoption](risk-fork/CLIENT_ADOPTION.md).
 
-The hosted builder still binds repository-relative source hashes in the integrations repository. This export does not switch that consumer to a new URL or package. [Pinned external consumer tests](risk-fork/test/integration/README.md) remain separate from the core suite and fail when their required inputs are missing.
+The hosted builder still binds repository-relative source hashes in the integrations repository. This export does not switch that consumer to a new URL or package. [Pinned external consumer tests](risk-fork/test/integration/README.md) compare the shared source inventory and exercise disabled client-review packets against the real separately supplied gateway. The standalone package and PostgreSQL dependency differ from the old hosted consumer, so full hosted closure and cutover remain unqualified. These explicit tests remain separate from the core suite and fail when their required inputs are missing.
 
 ## Status, provenance and license
 

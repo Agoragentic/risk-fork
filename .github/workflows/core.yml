@@ -278,10 +278,11 @@ jobs:
           persist-credentials: false
       - name: Install only locked upstream core test dependencies
         run: npm --prefix .upstream/risk-fork ci --ignore-scripts --no-audit --no-fund
-      - name: Verify explicit demo and hosted regressions
+      - name: Verify shared source, disabled client review and pinned consumer regressions
         shell: bash
         run: |
           export RISK_FORK_UPSTREAM_CHECKOUT="$GITHUB_WORKSPACE/.upstream"
           export RISK_FORK_HOSTED_BUNDLE="$GITHUB_WORKSPACE/.upstream/risk-fork-hosted-mcp/dist/runtime/index.mjs"
+          node --test risk-fork/test/integration/compatibility-source.test.mjs
           npm --prefix risk-fork run test:integration:demo
           npm --prefix risk-fork run test:integration:hosted
