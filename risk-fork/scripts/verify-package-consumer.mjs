@@ -96,6 +96,9 @@ try {
     'Managed-service DDL must not become a public SDK migration export');
   for (const file of included) {
     assert.ok(!/(?:^|\/)(?:node_modules|\.git|\.env|test|hackathon)(?:\/|$)/.test(file), `Unexpected package path: ${file}`);
+    assert.ok(!/^managed-service\/(?:src|host|migrations|scripts|test)\//.test(file), `Managed runtime must remain checkout-only: ${file}`);
+    assert.ok(!file.startsWith('examples/runtime-dynamic/'), `Runtime Dynamic example must remain checkout-only: ${file}`);
+    assert.ok(!file.startsWith('scripts/lib/') && !/^scripts\/(?:test|verify)-e2b-sdk-/.test(file), `SDK laboratory must remain checkout-only: ${file}`);
     assert.ok(!file.endsWith('.tgz') && !file.endsWith('.zip'), 'Nested release artifact');
   }
   for (const document of [

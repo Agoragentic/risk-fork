@@ -1,0 +1,3 @@
+# PostgreSQL migration identities bind exact bytes across platforms.
+risk-fork/migrations/*.sql text eol=lf
+risk-fork/managed-service/migrations/*.sql text eol=lf
