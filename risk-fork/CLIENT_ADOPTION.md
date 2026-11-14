@@ -38,15 +38,15 @@ The generated configurations embed no credential values. Their empty `env` maps 
 
 ## Preview the packets
 
-From a pinned source checkout with Node.js 20 or newer:
+From this standalone checkout with Node.js >=20.18.1 for the locked development dependencies:
 
 ```bash
 npm --prefix risk-fork ci --ignore-scripts
 node risk-fork/scripts/client-adoption.mjs status
-node risk-fork/scripts/client-adoption.mjs plan --client all
+node risk-fork/scripts/client-adoption.mjs plan --client all --gateway /absolute/path/to/risk-forkd.js --gateway-sha256 "$REVIEWED_GATEWAY_SHA256"
 ```
 
-The source checkout uses its sibling `mcp/risk-forkd.js` and a finite reviewed digest allowlist pinned in the planning script by default. The allowlist contains only the exact LF and CRLF raw-byte forms of the checked-in source, and the packet records which matching raw digest was read. An installed tarball has no monorepo sibling, so supply the exact external gateway and its independently reviewed digest explicitly:
+The upstream integrations checkout can use its sibling `mcp/risk-forkd.js` with a finite reviewed digest allowlist. This standalone repository and the installed tarball have no production gateway sibling, so the inherited implicit default fails closed. Supply the exact external gateway and its independently reviewed digest explicitly. The copied test fixtures are not installation targets. From the package directory:
 
 ```bash
 npm run client:plan -- --gateway /absolute/path/to/risk-forkd.js --gateway-sha256 "$REVIEWED_GATEWAY_SHA256"

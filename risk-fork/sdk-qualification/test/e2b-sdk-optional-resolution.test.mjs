@@ -205,19 +205,6 @@ test('deleted ancestor package with cached executable remains rejected', async (
   assert.equal(globalThis[f.marker], undefined);
 });
 
-test('hosted bundle rejects unbound ancestor optional before evaluation', async (t) => {
-  const f = await fixture(t);
-  await writePackage(f.outer, f.name, f.source);
-  const hosted = await import('../../../risk-fork-hosted-mcp/dist/runtime/index.mjs');
-  const verifier = hosted.createE2BRuntimeSdkIntegrityVerifier({ packageDirectory: f.sdk });
-  await assert.rejects(async () => {
-    const pin = await verifier.inspect();
-    await hosted.loadVerifiedE2BRuntimeSdk(pin, verifier);
-  }, /outside|closure|absent optional/i);
-  assert.equal(globalThis[f.marker], undefined);
-});
-
-
 test('deleted ancestor package with cached subpath remains rejected', async (t) => {
   const f = await fixture(t, { entry: 'module.exports = {};\n' });
   await mkdir(f.outer, { recursive: true });

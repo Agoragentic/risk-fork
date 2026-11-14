@@ -1,0 +1,284 @@
+name: Risk Fork core
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  skillspector-ledger-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Reproduce pinned upstream ledger fixture (read-only public source downloads)
+        run: |
+          python --version
+          python risk-fork/test/test_skillspector_ledger_probe.py
+
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22, 24]
+        os: [ubuntu-latest]
+        package:
+          - risk-fork
+        include:
+          - node-version: 24
+            os: macos-latest
+            package: risk-fork
+    env:
+      AGORAGENTIC_NO_SPEND: '1'
+      AGORAGENTIC_ALLOW_REAL_SPEND: '0'
+      AGORAGENTIC_ALLOW_NETWORK_CANARIES: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+      - name: Prepare POSIX Risk Fork state root
+        if: runner.os != 'Windows' && matrix.package == 'risk-fork'
+        shell: bash
+        run: |
+          state_root="$RUNNER_TEMP/risk-fork-state"
+          mkdir -p "$state_root"
+          chmod 700 "$state_root"
+          state_root="$(cd "$state_root" && pwd -P)"
+          printf 'XDG_STATE_HOME=%s\n' "$state_root" >> "$GITHUB_ENV"
+      - name: Canonicalize temporary paths for strict filesystem checks
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import os from 'node:os';
+          const root = fs.realpathSync.native(os.tmpdir());
+          for (const name of ['TMPDIR', 'TMP', 'TEMP']) fs.appendFileSync(process.env.GITHUB_ENV, `${name}=${root}\n`);
+          NODE
+      - name: Install locked test dependencies
+        working-directory: ${{ matrix.package }}
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Syntax and contract checks
+        working-directory: ${{ matrix.package }}
+        run: npm run check
+      - name: Audit the full core dependency graph
+        if: matrix.package == 'risk-fork'
+        working-directory: risk-fork
+        run: npm audit
+      - name: Deterministic tests
+        working-directory: ${{ matrix.package }}
+        run: npm test
+      - name: No-network self-test
+        working-directory: ${{ matrix.package }}
+        run: npm run self-test
+      - name: Offline packed consumer
+        working-directory: risk-fork
+        run: npm run test:package -- --offline
+      - name: Package dry run
+        working-directory: ${{ matrix.package }}
+        run: npm run pack:dry
+
+  e2b-sdk-qualification:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22.19.0', '22', '24']
+        os: [ubuntu-latest]
+        include:
+          - node-version: '22'
+            os: windows-latest
+          - node-version: '22'
+            os: macos-latest
+    env:
+      AGORAGENTIC_NO_SPEND: '1'
+      AGORAGENTIC_ALLOW_REAL_SPEND: '0'
+      AGORAGENTIC_ALLOW_NETWORK_CANARIES: '0'
+      npm_config_engine_strict: 'true'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: |
+            risk-fork/package-lock.json
+            risk-fork/sdk-qualification/package-lock.json
+      - name: Prepare private state for provider-free qualification
+        run: |
+          state_root="$RUNNER_TEMP/risk-fork-state"
+          mkdir -p "$state_root"
+          chmod 700 "$state_root"
+          printf 'XDG_STATE_HOME=%s\n' "$state_root" >> "$GITHUB_ENV"
+      - name: Use canonical temporary paths for strict filesystem tests
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import os from 'node:os';
+          const canonicalTemp = fs.realpathSync.native(os.tmpdir());
+          for (const name of ['TMPDIR', 'TMP', 'TEMP']) {
+            fs.appendFileSync(process.env.GITHUB_ENV, `${name}=${canonicalTemp}\n`);
+          }
+          NODE
+      - name: Install and audit both locked development graphs
+        run: |
+          npm --prefix risk-fork ci --ignore-scripts --no-audit --no-fund
+          npm --prefix risk-fork/sdk-qualification ci --ignore-scripts --no-audit --no-fund
+          npm --prefix risk-fork audit
+          npm --prefix risk-fork/sdk-qualification audit
+      - name: Qualify exact SDK closure, binding, process gates and loopback contract
+        run: npm --prefix risk-fork/sdk-qualification test
+
+  postgres-authority:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        # PostgreSQL 16: official Docker Hub copy of the same immutable ECR index.
+        image: docker.io/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_USER: risk_fork
+          POSTGRES_PASSWORD: risk_fork_ci
+          POSTGRES_DB: risk_fork_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U risk_fork -d risk_fork_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      AGORAGENTIC_NO_SPEND: '1'
+      AGORAGENTIC_ALLOW_REAL_SPEND: '0'
+      AGORAGENTIC_ALLOW_NETWORK_CANARIES: '0'
+      RISK_FORK_TEST_POSTGRES_URL: postgresql://risk_fork:risk_fork_ci@127.0.0.1:5432/risk_fork_test
+      RISK_FORK_REQUIRE_POSTGRES_TESTS: '1'
+      RISK_FORK_TEST_POSTGRES_TLS_URL: postgresql://risk_fork:risk_fork_ci@127.0.0.1:5432/risk_fork_test
+      RISK_FORK_REQUIRE_POSTGRES_TLS_TESTS: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: risk-fork/package-lock.json
+      - name: Install locked Risk Fork dependencies
+        working-directory: risk-fork
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Enable CA-verified TLS on the ephemeral PostgreSQL service
+        shell: bash
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          tls_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$tls_dir"' EXIT
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout "$tls_dir/ca.key" \
+            -out "$tls_dir/ca.crt" \
+            -subj '/CN=Risk Fork CI CA'
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout "$tls_dir/server.key" \
+            -out "$tls_dir/server.csr" \
+            -subj '/CN=localhost'
+          cat > "$tls_dir/server.ext" <<'EOF'
+          subjectAltName=DNS:localhost,IP:127.0.0.1
+          extendedKeyUsage=serverAuth
+          EOF
+          openssl x509 -req -days 1 \
+            -in "$tls_dir/server.csr" \
+            -CA "$tls_dir/ca.crt" \
+            -CAkey "$tls_dir/ca.key" \
+            -CAcreateserial \
+            -out "$tls_dir/server.crt" \
+            -extfile "$tls_dir/server.ext"
+          chmod 0600 "$tls_dir/server.key"
+          docker cp "$tls_dir/ca.crt" "$POSTGRES_CONTAINER_ID:/var/lib/postgresql/ca.crt"
+          docker cp "$tls_dir/server.crt" "$POSTGRES_CONTAINER_ID:/var/lib/postgresql/server.crt"
+          docker cp "$tls_dir/server.key" "$POSTGRES_CONTAINER_ID:/var/lib/postgresql/server.key"
+          docker exec --user root "$POSTGRES_CONTAINER_ID" \
+            chown postgres:postgres \
+              /var/lib/postgresql/ca.crt \
+              /var/lib/postgresql/server.crt \
+              /var/lib/postgresql/server.key
+          docker exec --user root "$POSTGRES_CONTAINER_ID" \
+            chmod 0600 /var/lib/postgresql/server.key
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U risk_fork -d risk_fork_test -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET ssl = 'on'" \
+            -c "ALTER SYSTEM SET ssl_ca_file = '/var/lib/postgresql/ca.crt'" \
+            -c "ALTER SYSTEM SET ssl_cert_file = '/var/lib/postgresql/server.crt'" \
+            -c "ALTER SYSTEM SET ssl_key_file = '/var/lib/postgresql/server.key'"
+          docker restart "$POSTGRES_CONTAINER_ID"
+          for attempt in $(seq 1 30); do
+            if docker exec "$POSTGRES_CONTAINER_ID" pg_isready \
+              -U risk_fork -d risk_fork_test >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo 'PostgreSQL did not become ready after TLS restart' >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          {
+            echo 'RISK_FORK_TEST_POSTGRES_TLS_CA<<RISK_FORK_TLS_CA_EOF'
+            cat "$tls_dir/ca.crt"
+            echo 'RISK_FORK_TLS_CA_EOF'
+          } >> "$GITHUB_ENV"
+      - name: Run mandatory PostgreSQL authority and clean-commit suite
+        working-directory: risk-fork
+        run: npm run test:postgres
+
+
+  upstream-consumers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AGORAGENTIC_NO_SPEND: '1'
+      AGORAGENTIC_ALLOW_REAL_SPEND: '0'
+      AGORAGENTIC_ALLOW_NETWORK_CANARIES: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Acquire exact public compatibility consumers
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: Agoragentic/agoragentic-integrations
+          ref: 7063285e253f92ba18f71470878cef5653a82743
+          path: .upstream
+          persist-credentials: false
+      - name: Install only locked upstream core test dependencies
+        run: npm --prefix .upstream/risk-fork ci --ignore-scripts --no-audit --no-fund
+      - name: Verify explicit demo and hosted regressions
+        shell: bash
+        run: |
+          export RISK_FORK_UPSTREAM_CHECKOUT="$GITHUB_WORKSPACE/.upstream"
+          export RISK_FORK_HOSTED_BUNDLE="$GITHUB_WORKSPACE/.upstream/risk-fork-hosted-mcp/dist/runtime/index.mjs"
+          npm --prefix risk-fork run test:integration:demo
+          npm --prefix risk-fork run test:integration:hosted

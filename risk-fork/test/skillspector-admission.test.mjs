@@ -576,7 +576,7 @@ test('missing inventory cannot be removed or reordered in rehashed evidence', ()
 
 test('the checked-in example equals actual adapter output and verifies against source fixture', async () => {
   const example = JSON.parse(await readFile(
-    new URL('../../skillspector/skillspector.admission.example.json', import.meta.url), 'utf8',
+    new URL('./fixtures/skillspector.admission.example.json', import.meta.url), 'utf8',
   ));
   assert.deepEqual(example, roundTrip(completeReport()));
 });

@@ -20,7 +20,6 @@ import { RISK_FORK_CLIENT_GATE_MAX_GATEWAY_BYTES } from '../src/client-adoption.
 import { containsSerializedCredentialMaterial } from '../src/util.mjs';
 
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
-const repositoryRoot = path.dirname(packageRoot);
 const gateEntrypoint = path.join(packageRoot, 'clients', 'one-tool-stdio-gate.mjs');
 const fixtureRoot = path.join(packageRoot, 'test', 'fixtures');
 const serveTest = process.platform === 'win32' ? test.skip : test;
@@ -733,13 +732,13 @@ serveTest('stdio client gate verifies exact gateway bytes and current gateway st
     const mismatch = spawnSync(process.execPath, [
       testGateEntrypoint,
       'serve',
-      '--gateway-entrypoint', path.join(repositoryRoot, 'mcp', 'risk-forkd.js'),
+      '--gateway-entrypoint', path.join(packageRoot, 'test', 'fixtures', 'upstream-mcp', 'risk-forkd.js'),
       '--gateway-sha256', `sha256:${'0'.repeat(64)}`,
     ], { cwd: packageRoot, encoding: 'utf8', timeout: 5000, windowsHide: true });
     assert.equal(mismatch.status, 78);
     assert.equal(JSON.parse(mismatch.stderr).reason_code, 'RISK_FORK_CLIENT_GATE_HASH_MISMATCH');
 
-    const currentGateway = path.join(repositoryRoot, 'mcp', 'risk-forkd.js');
+    const currentGateway = path.join(packageRoot, 'test', 'fixtures', 'upstream-mcp', 'risk-forkd.js');
     const unavailable = spawnSync(process.execPath, [
       gateEntrypoint,
       'serve',

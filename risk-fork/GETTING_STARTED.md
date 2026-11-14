@@ -4,23 +4,31 @@ Agoragentic Risk Fork is an Apache-2.0 experimental protocol and reference
 implementation created by Jeremy Borden / Agoragentic. Choose the demonstration
 path to see it work, or the host integration path to develop an adapter.
 
-## Run the visual demonstration
+## Run the local reference
 
-Use the [hackathon quickstart](https://github.com/rhein1/agoragentic-integrations/blob/main/risk-fork/hackathon/docs/QUICKSTART.md) from a pinned
-source checkout or a verified offline release kit. The demo includes a local
-MCP server and a Flight Recorder. It accepts named synthetic scenarios only.
+The standalone core includes an offline local reference and framework examples.
+The locked development graph requires Node >=20.18.1. Run the local reference on
+a POSIX host with a private state root; native Windows local-reference storage
+is unavailable pending ACL/reparse qualification.
 
-```powershell
+```sh
+export TMPDIR="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+export TMP="$TMPDIR" TEMP="$TMPDIR"
+export XDG_STATE_HOME="$(cd "$(mktemp -d)" && pwd -P)"
+chmod 700 "$XDG_STATE_HOME"
 npm --prefix risk-fork ci --ignore-scripts --no-audit --no-fund
-node risk-fork/hackathon/bin/risk-fork-demo.mjs doctor
-node risk-fork/hackathon/bin/risk-fork-demo.mjs run --scenario e2b-malicious-mcp-containment
-node risk-fork/hackathon/bin/risk-fork-demo.mjs serve
+npm --prefix risk-fork run self-test
+npm --prefix risk-fork run demo:frameworks
 ```
 
-The demo uses a local reference adapter or an injected fake E2B SDK. It grants
-no external-action authority and provides no live isolation or traffic
-protection. The hackathon files are distributed in the repository/offline ZIP;
-they are intentionally excluded from the core npm tarball.
+Retain that task-specific temporary directory while inspecting output, then
+remove it when finished. Do not relax the adapter's ownership/mode checks or
+change an existing user state directory to make a fixture pass.
+
+These examples grant no external-action authority and provide no live isolation
+or traffic protection. The separate visual demo is outside this core export;
+use its [exact upstream quickstart](https://github.com/Agoragentic/agoragentic-integrations/blob/7063285e253f92ba18f71470878cef5653a82743/risk-fork/hackathon/docs/QUICKSTART.md)
+in that upstream checkout. Do not run demo paths inside this standalone repository.
 
 ## Install a local package candidate
 

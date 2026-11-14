@@ -45,7 +45,7 @@ const require = createRequire(import.meta.url);
 const {
   connectRemoteClient,
   createMcpEnforcementBoundary,
-} = require('../../mcp/mcp-server.js');
+} = require('./fixtures/upstream-mcp/mcp-server.cjs');
 
 const NOW = new Date('2030-01-01T00:00:00.000Z');
 const LATER = '2030-01-01T01:00:00.000Z';

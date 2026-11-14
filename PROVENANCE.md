@@ -1,0 +1,15 @@
+# Standalone export provenance
+
+Source repository: `Agoragentic/agoragentic-integrations`.
+
+Source revision: `7063285e253f92ba18f71470878cef5653a82743`, from unmerged PR #556 stacked on PR #553. This is reviewed source with passing upstream CI, not a claim that main contains those changes. PRs #554 and #555 concern observer/managed components outside this core export and remain tracked in the original repository.
+
+The initial path-filtered history has 160 commits and filtered head `e21cbc2f362a37456cb7d344bf9845294692a000`. Filtering changes commit IDs and parent links; original commit signatures cannot validate the transformed commits. No replacement release tags or signature claims were created. Original source identifiers remain in the private export mapping; the exact upstream commit above is the external lineage anchor. The original repository and its history were not rewritten.
+
+Included paths: core source, schemas, migrations, template source, clients, public PostgreSQL templates, assets, credential-free tests/SDK qualification, three local examples, selected public runbooks/package metadata/notices, and the shared canonicalization module. Managed runtime source, hosted-MCP package, demo application, dynamic live-host examples, observer process lab, private wiring, raw evidence, deployment settings, generated dependencies and database/environment files are outside this tranche. Selected public managed documentation and role templates remain because the core packed-consumer contract requires them; they do not include a managed service.
+
+Standalone adaptations update package metadata, move sibling consumer assertions into explicit exact-input integration commands, and supply byte-identical public MIT fixtures for the remaining test-only sibling imports. Runtime source is unchanged from the selected upstream core. The inherited default MCP gateway is absent, so callers must supply their own reviewed absolute gateway path and hash. Root documentation and provider-free CI are added separately from the filtered history.
+
+Every exported historical blob and commit object was scanned locally with official Gitleaks 8.30.1, whose downloaded archive matched GitHub's SHA-256 `551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb`. The initial history scan covered 824 blobs and 160 commit objects (20,968,663 bytes). It returned 15 findings, retained for review: five instances of alphabetic synthetic token fixtures in historical schema tests and ten matches on `keyStart` index-comparison code in two scanner modules. These are reviewed test/code matches, not evidence of valid credentials. A scanner and source review cannot guarantee that no unknown issue exists. Private redacted reports and object inventories remain outside this repository.
+
+The existing integrations mirror remains unchanged. The hosted builder's repository-relative source hashes, copied assets, ARD discovery pointers and MCP consumers must continue to resolve there until exact-commit or package/digest lineage is qualified. No deployment, package release or live provider action is part of this export.

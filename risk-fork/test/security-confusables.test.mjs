@@ -33,7 +33,6 @@ import {
   destroyImmutableWorkspaceExport,
 } from '../src/adapters/e2b-workspace-export.mjs';
 import { inspectProcessEnvironmentBytes } from '../e2b-template/bin/boot-guard.mjs';
-import { validateDemoOperation } from '../hackathon/src/security.mjs';
 import {
   containsSecretShapedText,
   containsSerializedCredentialMaterial,
@@ -1733,21 +1732,6 @@ test('boot environment byte scan folds only a fatal canonical Unicode decode', (
     Buffer.from('API_K\u0435Y=12345678\0', 'utf8'),
   );
   assert.equal(confusable.forbidden_key_hashes.length, 1);
-});
-
-test('hackathon operation gate folds demo-only secret field names', () => {
-  assert.throws(
-    () => validateDemoOperation({
-      kind: 'bounded_file_batch',
-      actions: [{
-        type: 'read',
-        path: 'workspace/result.txt',
-        ['cook\u0456e']: 'opaque',
-      }],
-      commit_candidate: null,
-    }),
-    /secret|credential/i,
-  );
 });
 
 test('MCP host and stdio client raw scans stay wired to shared folded detectors', async () => {

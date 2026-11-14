@@ -28,9 +28,8 @@ import {
 } from '../src/client-adoption.mjs';
 
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
-const repositoryRoot = path.dirname(packageRoot);
 const gateEntrypoint = path.join(packageRoot, 'clients', 'one-tool-stdio-gate.mjs');
-const gatewayEntrypoint = path.join(repositoryRoot, 'mcp', 'risk-forkd.js');
+const gatewayEntrypoint = path.join(packageRoot, 'test', 'fixtures', 'upstream-mcp', 'risk-forkd.js');
 const cliEntrypoint = path.join(packageRoot, 'scripts', 'client-adoption.mjs');
 
 function hashBytes(bytes) {
@@ -394,6 +393,11 @@ test('client adoption CLI never reflects an unknown credential-shaped argument',
 
 test('client adoption CLI previews without writes and writes only inactive review files', async () => {
   const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'risk-fork-client-adoption-'));
+  const gatewayHash = await hashFile(gatewayEntrypoint);
+  const runFixtureCli = (args) => runCli(args.includes('--gateway') || args.includes('--gateway-sha256')
+    ? args : [...args, '--gateway', gatewayEntrypoint, '--gateway-sha256', gatewayHash]);
+  const missingDefault = runCli(['plan', '--client', 'all']);
+  assert.equal(missingDefault.status, 64, 'standalone checkout has no implicit host gateway');
   try {
     const oversizedSource = path.join(temporaryRoot, 'oversized-source');
     const oversizedGateway = path.join(oversizedSource, 'risk-forkd.js');
@@ -403,7 +407,7 @@ test('client adoption CLI previews without writes and writes only inactive revie
       Buffer.alloc(RISK_FORK_CLIENT_GATE_MAX_GATEWAY_BYTES + 1, 0x61),
     );
     const before = await readdir(temporaryRoot);
-    const unpairedGateway = runCli([
+    const unpairedGateway = runFixtureCli([
       'plan', '--client', 'all', '--gateway', gatewayEntrypoint,
     ]);
     assert.equal(unpairedGateway.status, 64);
@@ -411,7 +415,7 @@ test('client adoption CLI previews without writes and writes only inactive revie
       JSON.parse(unpairedGateway.stderr).message,
       /--gateway and --gateway-sha256 must be supplied together/,
     );
-    const unpairedGatewayHash = runCli([
+    const unpairedGatewayHash = runFixtureCli([
       'plan', '--client', 'all', '--gateway-sha256', await hashFile(gatewayEntrypoint),
     ]);
     assert.equal(unpairedGatewayHash.status, 64);
@@ -419,7 +423,7 @@ test('client adoption CLI previews without writes and writes only inactive revie
       JSON.parse(unpairedGatewayHash.stderr).message,
       /--gateway and --gateway-sha256 must be supplied together/,
     );
-    const oversizedPlan = runCli([
+    const oversizedPlan = runFixtureCli([
       'plan', '--client', 'all', '--gateway', oversizedGateway,
       '--gateway-sha256', await hashFile(oversizedGateway),
     ]);
@@ -429,7 +433,7 @@ test('client adoption CLI previews without writes and writes only inactive revie
       new RegExp(`at most ${RISK_FORK_CLIENT_GATE_MAX_GATEWAY_BYTES} bytes`),
     );
     const oversizedOutput = path.join(temporaryRoot, 'oversized-output');
-    const oversizedWrite = runCli([
+    const oversizedWrite = runFixtureCli([
       'write-review', '--client', 'all', '--gateway', oversizedGateway,
       '--gateway-sha256', await hashFile(oversizedGateway),
       '--output', oversizedOutput, '--yes',
@@ -437,7 +441,7 @@ test('client adoption CLI previews without writes and writes only inactive revie
     assert.equal(oversizedWrite.status, 64);
     assert.deepEqual(await readdir(temporaryRoot), before);
 
-    const preview = runCli(['plan', '--client', 'all']);
+    const preview = runFixtureCli(['plan', '--client', 'all']);
     assert.equal(preview.status, 0, preview.stderr);
     const previewPacket = JSON.parse(preview.stdout);
     const currentGatewayBytes = await readFile(gatewayEntrypoint);
@@ -471,7 +475,7 @@ test('client adoption CLI previews without writes and writes only inactive revie
     assert.equal(previewPacket.controls.writes_performed, false);
     assert.deepEqual(await readdir(temporaryRoot), before);
 
-    const refused = runCli([
+    const refused = runFixtureCli([
       'write-review', '--client', 'all', '--output', path.join(temporaryRoot, 'refused'),
     ]);
     assert.equal(refused.status, 64);
@@ -479,7 +483,7 @@ test('client adoption CLI previews without writes and writes only inactive revie
     assert.deepEqual(await readdir(temporaryRoot), before);
 
     const output = path.join(temporaryRoot, 'packet');
-    const written = runCli([
+    const written = runFixtureCli([
       'write-review', '--client', 'all', '--output', output, '--yes',
     ]);
     assert.equal(written.status, 0, written.stderr);
@@ -502,7 +506,7 @@ test('client adoption CLI previews without writes and writes only inactive revie
       '.mcp.json', 'config.toml', 'mcp.json', 'permissions.json', 'settings.json',
     ].includes(name)), false);
 
-    const verified = runCli([
+    const verified = runFixtureCli([
       'verify-review', '--manifest', path.join(output, 'manifest.json'),
     ]);
     assert.equal(verified.status, 0, verified.stderr);
@@ -516,7 +520,7 @@ test('client adoption CLI previews without writes and writes only inactive revie
       network_used: false,
       live_traffic_protected: false,
     });
-    const oversizedVerify = runCli([
+    const oversizedVerify = runFixtureCli([
       'verify-review', '--manifest', path.join(output, 'manifest.json'),
       '--gateway', oversizedGateway,
       '--gateway-sha256', await hashFile(oversizedGateway),
@@ -530,7 +534,7 @@ test('client adoption CLI previews without writes and writes only inactive revie
     const manifestPath = path.join(output, 'manifest.json');
     const canonicalManifest = await readFile(manifestPath, 'utf8');
     await writeFile(manifestPath, '{"schema": Basic dTpw}\n', 'utf8');
-    const malformed = runCli(['verify-review', '--manifest', manifestPath]);
+    const malformed = runFixtureCli(['verify-review', '--manifest', manifestPath]);
     assert.equal(malformed.status, 64);
     assert.match(JSON.parse(malformed.stderr).message, /must contain valid JSON/);
     assert.doesNotMatch(malformed.stderr, /dTpw/);
@@ -544,7 +548,7 @@ test('client adoption CLI previews without writes and writes only inactive revie
     ];
     for (const duplicateManifest of duplicateManifests) {
       await writeFile(manifestPath, duplicateManifest, 'utf8');
-      const duplicate = runCli(['verify-review', '--manifest', manifestPath]);
+      const duplicate = runFixtureCli(['verify-review', '--manifest', manifestPath]);
       assert.equal(duplicate.status, 64);
       assert.match(JSON.parse(duplicate.stderr).message, /exact current source packet/);
       assert.doesNotMatch(duplicate.stderr, /dTpw/);
@@ -556,7 +560,7 @@ test('client adoption CLI previews without writes and writes only inactive revie
     await writeFile(forgedFilename, '{}\n', 'utf8');
     forgedManifest.files[0].sha256 = await hashFile(forgedFilename);
     await writeFile(manifestPath, `${JSON.stringify(forgedManifest, null, 2)}\n`, 'utf8');
-    const forged = runCli(['verify-review', '--manifest', manifestPath]);
+    const forged = runFixtureCli(['verify-review', '--manifest', manifestPath]);
     assert.equal(forged.status, 64);
     assert.match(JSON.parse(forged.stderr).message, /exact current source packet/);
   } finally {

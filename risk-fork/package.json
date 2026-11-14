@@ -9,7 +9,7 @@
     "name": "Jeremy Borden",
     "url": "https://agoragentic.com"
   },
-  "homepage": "https://github.com/rhein1/agoragentic-integrations/tree/main/risk-fork",
+  "homepage": "https://github.com/Agoragentic/risk-fork",
   "publishConfig": {
     "access": "public",
     "tag": "alpha",
@@ -112,7 +112,9 @@
     "postgres:migrate": "node scripts/migrate-postgres-authority.mjs",
     "client:status": "node scripts/client-adoption.mjs status",
     "client:plan": "node scripts/client-adoption.mjs plan --client all",
-    "pack:dry": "npm pack --dry-run"
+    "pack:dry": "npm pack --dry-run",
+    "test:integration:demo": "node --test test/integration/demo-security.test.mjs",
+    "test:integration:hosted": "node --test sdk-qualification/integration/hosted-optional-resolution.test.mjs"
   },
   "dependencies": {
     "ajv": "8.20.0",
@@ -143,11 +145,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rhein1/agoragentic-integrations.git",
+    "url": "git+https://github.com/Agoragentic/risk-fork.git",
     "directory": "risk-fork"
   },
   "bugs": {
-    "url": "https://github.com/rhein1/agoragentic-integrations/issues"
+    "url": "https://github.com/Agoragentic/risk-fork/issues"
   },
   "devDependencies": {
     "undici": "7.30.1"

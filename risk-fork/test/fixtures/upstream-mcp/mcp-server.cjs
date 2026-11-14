@@ -1,0 +1,2861 @@
+#!/usr/bin/env node
+'use strict';
+
+const crypto = require('crypto');
+const { TextDecoder, types: { isProxy } } = require('node:util');
+const { version: PACKAGE_VERSION } = require('./package.json');
+
+const DEFAULT_REMOTE_MCP_URL = 'https://agoragentic.com/api/mcp';
+const REMOTE_MCP_URL = process.env.AGORAGENTIC_MCP_URL || DEFAULT_REMOTE_MCP_URL;
+const EXPLICIT_AGORAGENTIC_BASE = process.env.AGORAGENTIC_BASE_URL || '';
+
+function fallbackBaseForRemote(remoteMcpUrl) {
+    if (EXPLICIT_AGORAGENTIC_BASE) return EXPLICIT_AGORAGENTIC_BASE;
+    try {
+        return new URL(remoteMcpUrl).origin;
+    } catch {
+        return '';
+    }
+}
+
+const AGORAGENTIC_BASE = fallbackBaseForRemote(REMOTE_MCP_URL);
+const MCP_V2_PROTOCOL_VERSION = '2026-07-28';
+const ACP_MODE = process.argv.includes('--acp');
+const MCP_REMOTE_CAPABILITY_KEYS = Object.freeze(['tools', 'resources', 'prompts']);
+const MCP_LOCAL_SERVER_CAPABILITIES = Object.freeze({
+    tools: Object.freeze({}),
+    resources: Object.freeze({}),
+    prompts: Object.freeze({}),
+});
+
+const MCP_ENFORCEMENT_SCHEMAS = Object.freeze({
+    boundary: 'agoragentic.mcp.host-enforcement-capability.v1',
+    sessionOpenRequest: 'agoragentic.mcp.enforced-session-open-request.v1',
+    phaseRequest: 'agoragentic.mcp.enforced-phase-request.v1',
+    fallbackRequest: 'agoragentic.mcp.enforced-fallback-request.v1',
+    hostSession: 'agoragentic.mcp.enforced-host-session.v1',
+    cleanImportedResult: 'agoragentic.mcp.clean-imported-result.v1',
+    session: 'agoragentic.mcp.enforced-session.v1',
+});
+const MCP_PHASES = new Set([
+    'server/discover',
+    'tools/list',
+    'tools/call',
+    'resources/list',
+    'resources/read',
+    'prompts/list',
+    'prompts/get',
+    'UNKNOWN',
+]);
+const MAX_ENFORCEMENT_JSON_BYTES = 4 * 1024 * 1024;
+const MAX_ENFORCEMENT_JSON_DEPTH = 50;
+const MAX_ENFORCEMENT_JSON_NODES = 50_000;
+const MAX_REMOTE_TOOL_DIRECTORY_PAGES = 100;
+const MAX_REMOTE_TOOL_DIRECTORY_TOOLS = 50_000;
+const MAX_REMOTE_TOOL_DIRECTORY_BYTES = MAX_ENFORCEMENT_JSON_BYTES;
+const MAX_REMOTE_TOOL_CURSOR_LENGTH = 4096;
+const MAX_ACP_SESSIONS = 1000;
+const MAX_ACP_CWD_LENGTH = 4096;
+const DEFAULT_HOST_TIMEOUTS = Object.freeze({
+    open_session_ms: 15_000,
+    request_ms: 30_000,
+    close_ms: 5_000,
+    fallback_ms: 30_000,
+});
+const MIN_HOST_TIMEOUT_MS = 10;
+const MAX_HOST_TIMEOUT_MS = 10 * 60 * 1000;
+const CANONICAL_INVOCATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
+const MIN_CREDENTIAL_ASSIGNMENT_VALUE_LENGTH = 8;
+const enforcementBoundaryAdapters = new WeakMap();
+const enforcedSessionRecords = new WeakMap();
+const IRREVERSIBLE_TOOLS = new Set([
+    'agoragentic_register',
+    'agoragentic_execute',
+    'agoragentic_invoke',
+    'agoragentic_call_service',
+    'agoragentic_quote',
+    'agoragentic_quote_service',
+    'agoragentic_preview_x402',
+]);
+const TOOL_CAPABILITY_KEYS = Object.freeze([
+    'network_access',
+    'filesystem_read',
+    'filesystem_write',
+    'credential_access',
+    'wallet_or_payment',
+    'deployment',
+    'publication',
+    'communication',
+    'database_mutation',
+    'trust_or_reputation_mutation',
+    'external_side_effect',
+    'unknown_or_unclassified',
+]);
+const IRREVERSIBLE_TOOL_CAPABILITIES = new Set([
+    'network_access',
+    'filesystem_write',
+    'credential_access',
+    'wallet_or_payment',
+    'deployment',
+    'publication',
+    'communication',
+    'database_mutation',
+    'trust_or_reputation_mutation',
+    'external_side_effect',
+]);
+const TOOL_ANNOTATION_KEYS = Object.freeze([
+    'readOnlyHint',
+    'destructiveHint',
+    'idempotentHint',
+    'openWorldHint',
+]);
+const SENSITIVE_CREDENTIAL_KEY_SEQUENCES = Object.freeze([
+    ['api', 'key'],
+    ['access', 'token'],
+    ['refresh', 'token'],
+    ['auth', 'token'],
+    ['auth'],
+    ['token'],
+    ['authorization'],
+    ['bearer'],
+    ['credential'],
+    ['cookie'],
+    ['set', 'cookie'],
+    ['password'],
+    ['passwd'],
+    ['secret'],
+    ['private', 'key'],
+    ['signing', 'key'],
+    ['wallet'],
+    ['payment', 'signature'],
+]);
+const SENSITIVE_CREDENTIAL_JOINED_KEYS = Object.freeze([
+    'apikey',
+    'accesskey',
+    'accesstoken',
+    'refreshtoken',
+    'authtoken',
+    'clientsecret',
+    'privatekey',
+    'signingkey',
+    'setcookie',
+    'paymentsignature',
+]);
+const AGORAGENTIC_GENERATED_API_KEY_PATTERN = /amk_[a-f0-9]{64}/;
+const EMBEDDED_CREDENTIAL_TOKEN_PATTERN =
+    /(?:(?:gh[pousr]|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{12,}|AKIA[A-Z0-9]{16}|sk-(?:(?:proj|svcacct|ant)-[A-Za-z0-9_-]{12,}|[A-Za-z0-9]{32,}))/;
+const BEARER_CREDENTIAL_PATTERN = /Bearer\s+[A-Za-z0-9._~+/=-]{8,}/i;
+const GENERIC_CREDENTIAL_TOKEN_PATTERN =
+    /\b(?:sk|gh[pousr]|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{12,}\b/;
+const CREDENTIAL_VALUE_PATTERNS = Object.freeze([
+    BEARER_CREDENTIAL_PATTERN,
+    AGORAGENTIC_GENERATED_API_KEY_PATTERN,
+    EMBEDDED_CREDENTIAL_TOKEN_PATTERN,
+    GENERIC_CREDENTIAL_TOKEN_PATTERN,
+    /-----BEGIN (?:RSA |EC |OPENSSH |PGP |ENCRYPTED )?[A-Z ]*PRIVATE KEY-----/i,
+]);
+const MCP_ACTIVE_DOCUMENT_MEDIA_TYPES = new Set([
+    'application/xhtml+xml',
+    'image/svg+xml',
+    'text/html',
+    'text/html+skybridge',
+]);
+const MCP_APP_METADATA_KEYS = new Set([
+    'iomodelcontextprotocolui',
+    'openaioutputtemplate',
+    'uiresourceuri',
+]);
+const ACTIVE_HTML_MARKUP_PATTERN = /(?:<(?=!|\/?[A-Za-z_:]|\?)|\bon[a-z]{2,32}\s*=|\b(?:java|vb)script\s*:|\bblob\s*:|\bdata\s*:\s*(?:text\/html|application\/xhtml\+xml|image\/svg\+xml)\b)/i;
+
+function containsCredentialMaterial(value) {
+    return typeof value === 'string'
+        && CREDENTIAL_VALUE_PATTERNS.some((pattern) => pattern.test(value));
+}
+
+class McpEnforcementError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'McpEnforcementError';
+        this.code = code;
+    }
+}
+
+function assertPlainRecord(value, field) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new TypeError(`${field} must be a plain object`);
+    }
+    if (isProxy(value)) throw new TypeError(`${field} must not be a Proxy`);
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+        throw new TypeError(`${field} must be a plain object`);
+    }
+    return value;
+}
+
+function assertExactKeys(value, keys, field) {
+    assertPlainRecord(value, field);
+    const allowed = new Set(keys);
+    if (Object.getOwnPropertySymbols(value).length > 0) {
+        throw new TypeError(`${field} contains a symbol key`);
+    }
+    for (const key of Object.getOwnPropertyNames(value)) {
+        if (containsCredentialMaterial(key)) {
+            throw new McpEnforcementError(
+                'MCP_CREDENTIAL_MATERIAL_REJECTED',
+                `${field}.<key> contains credential-shaped material`,
+            );
+        }
+        if (!allowed.has(key)) throw new TypeError(`${field}.<key> is not allowed`);
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (!descriptor?.enumerable || descriptor.get || descriptor.set) {
+            throw new TypeError(`${field}.<key> is hidden or accessor-backed`);
+        }
+    }
+}
+
+function cloneBoundedJson(value, field = 'value') {
+    let nodes = 0;
+    let bytes = 0;
+    const ancestors = new WeakSet();
+
+    function walk(current, path, depth) {
+        nodes += 1;
+        if (nodes > MAX_ENFORCEMENT_JSON_NODES) {
+            throw new TypeError(`${field} exceeds the JSON node limit`);
+        }
+        if (depth > MAX_ENFORCEMENT_JSON_DEPTH) {
+            throw new TypeError(`${field} exceeds the JSON depth limit`);
+        }
+        if (current === null || typeof current === 'boolean') return current;
+        if (typeof current === 'string') {
+            bytes += Buffer.byteLength(current, 'utf8');
+            if (bytes > MAX_ENFORCEMENT_JSON_BYTES) {
+                throw new TypeError(`${field} exceeds the JSON byte limit`);
+            }
+            return current;
+        }
+        if (typeof current === 'number') {
+            if (!Number.isFinite(current) || Object.is(current, -0)) {
+                throw new TypeError(`${path} must be a finite, unambiguous JSON number`);
+            }
+            if (Number.isInteger(current) && !Number.isSafeInteger(current)) {
+                throw new TypeError(`${path} is outside the safe integer range`);
+            }
+            return current;
+        }
+        if (!current || typeof current !== 'object') {
+            throw new TypeError(`${path} is not a JSON value`);
+        }
+        if (isProxy(current)) throw new TypeError(`${path} must not be a Proxy`);
+        if (ancestors.has(current)) throw new TypeError(`${path} contains a cycle`);
+        ancestors.add(current);
+        try {
+            const descriptors = Object.getOwnPropertyDescriptors(current);
+            if (Object.getOwnPropertySymbols(current).length > 0) {
+                throw new TypeError(`${path} contains a symbol key`);
+            }
+            for (const [key, descriptor] of Object.entries(descriptors)) {
+                if (Array.isArray(current) && key === 'length') continue;
+                if (!descriptor.enumerable || descriptor.get || descriptor.set) {
+                    throw new TypeError(`${path}.<key> is hidden or accessor-backed`);
+                }
+            }
+            if (Array.isArray(current)) {
+                if (Object.getPrototypeOf(current) !== Array.prototype) {
+                    throw new TypeError(`${path} must use the standard Array prototype`);
+                }
+                const keys = Object.keys(current);
+                if (keys.length !== current.length
+                    || keys.some((key) => !/^(?:0|[1-9][0-9]*)$/.test(key) || Number(key) >= current.length)) {
+                    throw new TypeError(`${path} is sparse or has extra properties`);
+                }
+                const output = [];
+                for (let index = 0; index < current.length; index += 1) {
+                    if (!Object.prototype.hasOwnProperty.call(current, index)) {
+                        throw new TypeError(`${path} is sparse`);
+                    }
+                    output.push(walk(current[index], `${path}[${index}]`, depth + 1));
+                }
+                return output;
+            }
+            assertPlainRecord(current, path);
+            const output = {};
+            for (const key of Object.keys(current).sort()) {
+                if (containsCredentialMaterial(key)) {
+                    throw new McpEnforcementError(
+                        'MCP_CREDENTIAL_MATERIAL_REJECTED',
+                        `${path}.<key> contains credential-shaped material`,
+                    );
+                }
+                if (['__proto__', 'constructor', 'prototype'].includes(key)) {
+                    throw new TypeError(`${path}.<key> is forbidden`);
+                }
+                output[key] = walk(current[key], `${path}.<value>`, depth + 1);
+            }
+            return output;
+        } finally {
+            ancestors.delete(current);
+        }
+    }
+
+    const cloned = walk(value, '$', 0);
+    const serialized = JSON.stringify(cloned);
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_ENFORCEMENT_JSON_BYTES) {
+        throw new TypeError(`${field} exceeds the serialized JSON byte limit`);
+    }
+    return cloned;
+}
+
+function stableJson(value) {
+    return JSON.stringify(cloneBoundedJson(value, 'hash input'));
+}
+
+function deepFreezeJson(value) {
+    if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+        for (const child of Object.values(value)) deepFreezeJson(child);
+        Object.freeze(value);
+    }
+    return value;
+}
+
+function normalizeCredentialKeyTokens(key) {
+    return String(key)
+        .replace(/(?<=[A-Z])(?=[A-Z][a-z])/g, '_')
+        .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter(Boolean)
+        .map((token) => (token.endsWith('s') && !token.endsWith('ss') ? token.slice(0, -1) : token));
+}
+
+function credentialKeyClassification(key) {
+    const tokens = normalizeCredentialKeyTokens(key);
+    const suffix = tokens.at(-1);
+    let referenceKind = suffix === 'ref' || suffix === 'hash' ? suffix : null;
+    const baseTokens = referenceKind ? tokens.slice(0, -1) : tokens;
+    let joinedBase = baseTokens.join('');
+    if (!referenceKind) {
+        for (const kind of ['ref', 'hash']) {
+            if (!joinedBase.endsWith(kind)) continue;
+            const candidate = joinedBase.slice(0, -kind.length);
+            const candidateSensitive = SENSITIVE_CREDENTIAL_JOINED_KEYS.some(
+                (joinedKey) => candidate.includes(joinedKey),
+            ) || SENSITIVE_CREDENTIAL_KEY_SEQUENCES.some(
+                (sequence) => candidate === sequence.join(''),
+            );
+            if (candidateSensitive) {
+                referenceKind = kind;
+                joinedBase = candidate;
+                break;
+            }
+        }
+    }
+    const sensitive = SENSITIVE_CREDENTIAL_JOINED_KEYS.some(
+        (joinedKey) => joinedBase.includes(joinedKey),
+    ) || SENSITIVE_CREDENTIAL_KEY_SEQUENCES.some((sequence) => {
+        if (sequence.length > baseTokens.length) return false;
+        for (let start = 0; start <= baseTokens.length - sequence.length; start += 1) {
+            if (sequence.every((token, index) => baseTokens[start + index] === token)) return true;
+        }
+        return false;
+    });
+    return { sensitive, referenceKind };
+}
+
+function assertOpaqueCredentialReference(value, path, kind) {
+    if (value === null) return;
+    if (typeof value !== 'string' || value.length < 1 || value.length > 500) {
+        throw new McpEnforcementError(
+            'MCP_CREDENTIAL_MATERIAL_REJECTED',
+            `${path} must be an opaque ${kind} string or null`,
+        );
+    }
+    if (kind === 'hash' && !/^sha256:[a-f0-9]{64}$/.test(value)) {
+        throw new McpEnforcementError(
+            'MCP_CREDENTIAL_MATERIAL_REJECTED',
+            `${path} must be a sha256 reference`,
+        );
+    }
+    if (kind === 'ref' && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,499}$/.test(value)) {
+        throw new McpEnforcementError(
+            'MCP_CREDENTIAL_MATERIAL_REJECTED',
+            `${path} must be an opaque credential reference`,
+        );
+    }
+    if (containsCredentialMaterial(value)) {
+        throw new McpEnforcementError(
+            'MCP_CREDENTIAL_MATERIAL_REJECTED',
+            `${path} contains credential-shaped material`,
+        );
+    }
+}
+
+function assertNoDuplicateJsonObjectKeys(text, field) {
+    if (Buffer.byteLength(text, 'utf8') > MAX_ENFORCEMENT_JSON_BYTES) {
+        throw new TypeError(`${field} exceeds the JSON byte limit`);
+    }
+    let index = 0;
+    let nodes = 0;
+
+    function syntaxError() {
+        throw new SyntaxError(`${field} is not valid JSON`);
+    }
+
+    function skipWhitespace() {
+        while (index < text.length && /[\t\n\r ]/.test(text[index])) index += 1;
+    }
+
+    function readString() {
+        if (text[index] !== '"') syntaxError();
+        index += 1;
+        let decoded = '';
+        while (index < text.length) {
+            const character = text[index];
+            index += 1;
+            if (character === '"') return decoded;
+            if (character === '\\') {
+                if (index >= text.length) syntaxError();
+                const escape = text[index];
+                index += 1;
+                const simpleEscapes = {
+                    '"': '"',
+                    '\\': '\\',
+                    '/': '/',
+                    b: '\b',
+                    f: '\f',
+                    n: '\n',
+                    r: '\r',
+                    t: '\t',
+                };
+                if (Object.hasOwn(simpleEscapes, escape)) {
+                    decoded += simpleEscapes[escape];
+                    continue;
+                }
+                if (escape !== 'u' || !/^[a-fA-F0-9]{4}$/.test(text.slice(index, index + 4))) {
+                    syntaxError();
+                }
+                decoded += String.fromCharCode(Number.parseInt(text.slice(index, index + 4), 16));
+                index += 4;
+                continue;
+            }
+            if (character.charCodeAt(0) <= 0x1f) syntaxError();
+            decoded += character;
+        }
+        syntaxError();
+    }
+
+    function parseValue(depth) {
+        nodes += 1;
+        if (nodes > MAX_ENFORCEMENT_JSON_NODES) {
+            throw new TypeError(`${field} exceeds the JSON node limit`);
+        }
+        if (depth > MAX_ENFORCEMENT_JSON_DEPTH) {
+            throw new TypeError(`${field} exceeds the JSON depth limit`);
+        }
+        skipWhitespace();
+        const character = text[index];
+        if (character === '{') {
+            parseObject(depth);
+            return;
+        }
+        if (character === '[') {
+            parseArray(depth);
+            return;
+        }
+        if (character === '"') {
+            readString();
+            return;
+        }
+        for (const literal of ['true', 'false', 'null']) {
+            if (text.startsWith(literal, index)) {
+                index += literal.length;
+                return;
+            }
+        }
+        const number = text.slice(index).match(/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/);
+        if (!number) syntaxError();
+        index += number[0].length;
+    }
+
+    function parseObject(depth) {
+        index += 1;
+        const keys = new Set();
+        skipWhitespace();
+        if (text[index] === '}') {
+            index += 1;
+            return;
+        }
+        while (index < text.length) {
+            skipWhitespace();
+            const key = readString();
+            const normalizedKey = key.normalize('NFC');
+            if (containsCredentialMaterial(key)) {
+                throw new McpEnforcementError(
+                    'MCP_CREDENTIAL_MATERIAL_REJECTED',
+                    `${field} contains a credential-shaped JSON object key`,
+                );
+            }
+            if (keys.has(normalizedKey)) {
+                throw new McpEnforcementError(
+                    'MCP_CREDENTIAL_MATERIAL_REJECTED',
+                    `${field} contains a duplicate JSON object key`,
+                );
+            }
+            keys.add(normalizedKey);
+            skipWhitespace();
+            if (text[index] !== ':') syntaxError();
+            index += 1;
+            parseValue(depth + 1);
+            skipWhitespace();
+            if (text[index] === '}') {
+                index += 1;
+                return;
+            }
+            if (text[index] !== ',') syntaxError();
+            index += 1;
+        }
+        syntaxError();
+    }
+
+    function parseArray(depth) {
+        index += 1;
+        skipWhitespace();
+        if (text[index] === ']') {
+            index += 1;
+            return;
+        }
+        while (index < text.length) {
+            parseValue(depth + 1);
+            skipWhitespace();
+            if (text[index] === ']') {
+                index += 1;
+                return;
+            }
+            if (text[index] !== ',') syntaxError();
+            index += 1;
+        }
+        syntaxError();
+    }
+
+    parseValue(0);
+    skipWhitespace();
+    if (index !== text.length) syntaxError();
+}
+
+async function* readBoundedLines(input, maxBytes, field) {
+    const lineBuffer = Buffer.allocUnsafe(maxBytes);
+    let lineLength = 0;
+    let discardingOversizedLine = false;
+
+    for await (const inputChunk of input) {
+        const chunk = Buffer.isBuffer(inputChunk)
+            ? inputChunk
+            : Buffer.from(String(inputChunk), 'utf8');
+        let offset = 0;
+        while (offset < chunk.length) {
+            const newline = chunk.indexOf(0x0a, offset);
+            const segmentEnd = newline === -1 ? chunk.length : newline;
+            const segmentLength = segmentEnd - offset;
+            if (!discardingOversizedLine) {
+                if (lineLength + segmentLength > maxBytes) {
+                    discardingOversizedLine = true;
+                    lineLength = 0;
+                } else if (segmentLength > 0) {
+                    chunk.copy(lineBuffer, lineLength, offset, segmentEnd);
+                    lineLength += segmentLength;
+                }
+            }
+            if (newline === -1) break;
+
+            if (discardingOversizedLine) {
+                yield { error: new TypeError(`${field} exceeds the JSON byte limit`) };
+            } else {
+                const contentLength = lineLength > 0 && lineBuffer[lineLength - 1] === 0x0d
+                    ? lineLength - 1
+                    : lineLength;
+                yield { text: lineBuffer.toString('utf8', 0, contentLength) };
+            }
+            lineLength = 0;
+            discardingOversizedLine = false;
+            offset = newline + 1;
+        }
+    }
+
+    if (discardingOversizedLine) {
+        yield { error: new TypeError(`${field} exceeds the JSON byte limit`) };
+    } else if (lineLength > 0) {
+        const contentLength = lineBuffer[lineLength - 1] === 0x0d ? lineLength - 1 : lineLength;
+        yield { text: lineBuffer.toString('utf8', 0, contentLength) };
+    }
+}
+
+function parseBoundedPlainJson(text, field) {
+    assertNoDuplicateJsonObjectKeys(text, field);
+    const parsed = deepFreezeJson(cloneBoundedJson(JSON.parse(text), field));
+    assertPlainRecord(parsed, field);
+    return parsed;
+}
+
+function assertNoCredentialMaterial(value, field, { phase = null } = {}) {
+    const propertySchemaMapKeywords = new Set(['properties', 'patternProperties']);
+    const namedSchemaMapKeywords = new Set(['$defs', 'definitions', 'dependentSchemas']);
+    const singleSchemaKeywords = new Set([
+        'additionalProperties',
+        'unevaluatedProperties',
+        'propertyNames',
+        'contains',
+        'not',
+        'if',
+        'then',
+        'else',
+        'contentSchema',
+    ]);
+    const schemaArrayKeywords = new Set(['allOf', 'anyOf', 'oneOf', 'prefixItems']);
+
+    function isToolSchemaRoot(pathTokens) {
+        return phase === 'tools/list'
+            && pathTokens.length === 4
+            && pathTokens[0] === 'result'
+            && pathTokens[1] === 'tools'
+            && Number.isInteger(pathTokens[2])
+            && ['inputSchema', 'outputSchema'].includes(pathTokens[3]);
+    }
+
+    function schemaRoleForChild(state, key, child, childTokens) {
+        if (isToolSchemaRoot(childTokens)) return 'schema';
+        if (state.schemaRole !== 'schema') return null;
+        if (propertySchemaMapKeywords.has(key)
+            && child
+            && typeof child === 'object'
+            && !Array.isArray(child)) {
+            return 'property-schema-map';
+        }
+        if (namedSchemaMapKeywords.has(key)
+            && child
+            && typeof child === 'object'
+            && !Array.isArray(child)) {
+            return 'named-schema-map';
+        }
+        if (schemaArrayKeywords.has(key) && Array.isArray(child)) return 'schema-array';
+        if (key === 'items') {
+            return Array.isArray(child) ? 'schema-array' : 'schema';
+        }
+        if (singleSchemaKeywords.has(key)) return 'schema';
+        return null;
+    }
+
+    function rejectSensitiveHeader(name, headerValue, path) {
+        if (typeof name !== 'string' || headerValue === null || headerValue === undefined) return;
+        if (credentialKeyClassification(name).sensitive) {
+            throw new McpEnforcementError(
+                'MCP_CREDENTIAL_MATERIAL_REJECTED',
+                `${path} contains an authority-bearing credential header`,
+            );
+        }
+    }
+
+    function inspectStructuredHeader(current, path) {
+        if (!current || typeof current !== 'object') return;
+        if (Array.isArray(current) && current.length === 2) {
+            rejectSensitiveHeader(current[0], current[1], `${path}[0]`);
+            return;
+        }
+        if (Array.isArray(current)) return;
+        for (const nameField of ['name', 'key']) {
+            if (!Object.hasOwn(current, nameField)) continue;
+            for (const valueField of ['value', 'values']) {
+                if (!Object.hasOwn(current, valueField)) continue;
+                rejectSensitiveHeader(
+                    current[nameField],
+                    current[valueField],
+                    `${path}.${nameField}`,
+                );
+            }
+        }
+    }
+
+    function parseJsonContentText(current, path, pathTokens) {
+        if (pathTokens.length < 3
+            || pathTokens.at(-1) !== 'text'
+            || !Number.isInteger(pathTokens.at(-2))
+            || pathTokens.at(-3) !== 'content') {
+            return null;
+        }
+        const trimmed = current.trim();
+        if (!((trimmed.startsWith('{') && trimmed.endsWith('}'))
+            || (trimmed.startsWith('[') && trimmed.endsWith(']')))) {
+            return null;
+        }
+        try {
+            assertNoDuplicateJsonObjectKeys(trimmed, `${path} embedded JSON`);
+            return cloneBoundedJson(JSON.parse(trimmed), `${path} embedded JSON`);
+        } catch (error) {
+            if (error instanceof SyntaxError) return null;
+            throw error;
+        }
+    }
+
+    function decodeAssignmentToken(token) {
+        return token
+            .replace(/\\u([a-fA-F0-9]{4})/g, (_match, hex) => (
+                String.fromCharCode(Number.parseInt(hex, 16))
+            ))
+            .replace(/\\(["'\\])/g, '$1');
+    }
+
+    function assertNoCredentialAssignments(current, path) {
+        // Every imported string is already covered by the 4 MiB JSON bound.
+        // Token and whitespace caps keep each assignment candidate bounded too.
+        const assignments = current.matchAll(
+            /(?:^|[\s{(\[,;?&:])(?:"((?:\\.|[^"\\\r\n]){1,128})"|'((?:\\.|[^'\\\r\n]){1,128})'|([A-Za-z][A-Za-z0-9_.-]{0,127}))[ \t]{0,256}(?:=|:)[ \t]{0,256}(?:"((?:\\.|[^"\\\r\n]){0,2048})"|'((?:\\.|[^'\\\r\n]){0,2048})'|([^\s,;}\]\r\n]{1,2048}))/g,
+        );
+        for (const match of assignments) {
+            const rawKey = match[1] ?? match[2] ?? match[3];
+            const classification = credentialKeyClassification(decodeAssignmentToken(rawKey));
+            if (!classification.sensitive) continue;
+
+            const rawValue = match[4] ?? match[5] ?? match[6] ?? '';
+            const assignmentValue = decodeAssignmentToken(rawValue)
+                .replace(/^["']/, '')
+                .replace(/["']$/, '')
+                .trim();
+            if (classification.referenceKind) {
+                assertOpaqueCredentialReference(
+                    assignmentValue || null,
+                    `${path}<assignment>`,
+                    classification.referenceKind,
+                );
+                continue;
+            }
+            if (assignmentValue.length >= MIN_CREDENTIAL_ASSIGNMENT_VALUE_LENGTH) {
+                throw new McpEnforcementError(
+                    'MCP_CREDENTIAL_MATERIAL_REJECTED',
+                    `${path} contains credential-shaped assignment material`,
+                );
+            }
+        }
+    }
+
+    function walk(current, path, pathTokens = [], state = {}) {
+        if (typeof current === 'string') {
+            if (containsCredentialMaterial(current)) {
+                throw new McpEnforcementError(
+                    'MCP_CREDENTIAL_MATERIAL_REJECTED',
+                    `${path} contains credential-shaped material`,
+                );
+            }
+            assertNoCredentialAssignments(current, path);
+            const parsedContent = parseJsonContentText(current, path, pathTokens);
+            if (parsedContent !== null) {
+                walk(parsedContent, `${path}<json>`, [...pathTokens, '<json>']);
+            }
+            return;
+        }
+        if (!current || typeof current !== 'object') return;
+        inspectStructuredHeader(current, path);
+        if (Array.isArray(current)) {
+            const childState = {
+                sensitiveSchemaDefinition: state.sensitiveSchemaDefinition,
+                schemaRole: state.schemaRole === 'schema-array' ? 'schema' : null,
+            };
+            current.forEach((child, index) => walk(
+                child,
+                `${path}[${index}]`,
+                [...pathTokens, index],
+                childState,
+            ));
+            return;
+        }
+        for (const [key, child] of Object.entries(current)) {
+            const parentKey = pathTokens.at(-1);
+            const booleanRiskCapabilityDeclaration = TOOL_CAPABILITY_KEYS.includes(key)
+                && typeof child === 'boolean'
+                && ['capabilities', 'agoragentic/risk-capabilities'].includes(parentKey);
+            if (containsCredentialMaterial(key) && !booleanRiskCapabilityDeclaration) {
+                throw new McpEnforcementError(
+                    'MCP_CREDENTIAL_MATERIAL_REJECTED',
+                    `${path}.<key> contains credential-shaped material`,
+                );
+            }
+            const childPath = `${path}.<value>`;
+            const childTokens = [...pathTokens, key];
+            if (state.sensitiveSchemaDefinition
+                && ['default', 'const', 'example', 'examples', 'enum'].includes(key)
+                && child !== null
+                && !(Array.isArray(child) && child.length === 0)) {
+                throw new McpEnforcementError(
+                    'MCP_CREDENTIAL_MATERIAL_REJECTED',
+                    `${childPath} embeds a value for a credential-shaped schema property`,
+                );
+            }
+
+            const classification = credentialKeyClassification(key);
+            if (['property-schema-map', 'named-schema-map'].includes(state.schemaRole)) {
+                if (classification.sensitive) assertPlainRecord(child, childPath);
+                walk(child, childPath, childTokens, {
+                    sensitiveSchemaDefinition: state.sensitiveSchemaDefinition
+                        || classification.sensitive,
+                    schemaRole: 'schema',
+                });
+                continue;
+            }
+            if (classification.sensitive && !booleanRiskCapabilityDeclaration) {
+                if (classification.referenceKind) {
+                    assertOpaqueCredentialReference(child, childPath, classification.referenceKind);
+                    continue;
+                }
+                if (child !== null) {
+                    throw new McpEnforcementError(
+                        'MCP_CREDENTIAL_MATERIAL_REJECTED',
+                        `${childPath} contains authority-bearing credential material`,
+                    );
+                }
+            }
+
+            walk(child, childPath, childTokens, {
+                sensitiveSchemaDefinition: state.sensitiveSchemaDefinition,
+                schemaRole: schemaRoleForChild(state, key, child, childTokens),
+            });
+        }
+    }
+    walk(value, field);
+}
+
+function normalizeImportedContentKey(key) {
+    return String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function isMcpAppOrActiveDocumentMediaType(value) {
+    if (typeof value !== 'string') return false;
+    const parts = value.trim().toLowerCase().split(';');
+    const essence = parts.shift()?.trim() ?? '';
+    if (MCP_ACTIVE_DOCUMENT_MEDIA_TYPES.has(essence)) return true;
+    return parts.some((parameter) => {
+        const [rawName, ...rawValue] = parameter.split('=');
+        if (rawName?.trim() !== 'profile') return false;
+        const profile = rawValue.join('=').trim().replace(/^['"]|['"]$/g, '');
+        return profile === 'mcp-app';
+    });
+}
+
+function containsActiveHtmlMarkup(value) {
+    return typeof value === 'string' && ACTIVE_HTML_MARKUP_PATTERN.test(value);
+}
+
+function decodeUtf32(value, littleEndian) {
+    let offset = 0;
+    if (value.length >= 4) {
+        const bom = value.subarray(0, 4);
+        if ((littleEndian && bom.equals(Buffer.from([0xff, 0xfe, 0x00, 0x00])))
+            || (!littleEndian && bom.equals(Buffer.from([0x00, 0x00, 0xfe, 0xff])))) {
+            offset = 4;
+        }
+    }
+
+    const chunks = [];
+    let chunk = '';
+    for (; offset + 4 <= value.length; offset += 4) {
+        const codePoint = littleEndian
+            ? value.readUInt32LE(offset)
+            : value.readUInt32BE(offset);
+        chunk += codePoint <= 0x10ffff && !(codePoint >= 0xd800 && codePoint <= 0xdfff)
+            ? String.fromCodePoint(codePoint)
+            : '\ufffd';
+        if (chunk.length >= 4096) {
+            chunks.push(chunk);
+            chunk = '';
+        }
+    }
+    if (offset !== value.length) chunk += '\ufffd';
+    chunks.push(chunk);
+    return chunks.join('');
+}
+
+function containsActiveMarkupBytes(value) {
+    if (!Buffer.isBuffer(value)) return false;
+    if (value.length > MAX_ENFORCEMENT_JSON_BYTES) return true;
+    if (containsActiveHtmlMarkup(value.toString('utf8'))) return true;
+
+    for (const encoding of ['utf-16le', 'utf-16be']) {
+        if (containsActiveHtmlMarkup(new TextDecoder(encoding).decode(value))) return true;
+    }
+    return containsActiveHtmlMarkup(decodeUtf32(value, true))
+        || containsActiveHtmlMarkup(decodeUtf32(value, false));
+}
+
+function decodeCanonicalBase64(value) {
+    if (typeof value !== 'string') return null;
+    const compact = value.replace(/[\t\n\r ]/g, '');
+    if (compact.length === 0) return Buffer.alloc(0);
+    if (compact.length === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(compact)) {
+        return null;
+    }
+    const unpadded = compact.replace(/=+$/, '');
+    if (unpadded.length % 4 === 1) return null;
+    const decoded = Buffer.from(unpadded, 'base64');
+    const canonicalInput = compact.replace(/=+$/, '');
+    const canonicalDecoded = decoded.toString('base64').replace(/=+$/, '');
+    return canonicalInput === canonicalDecoded ? decoded : null;
+}
+
+function normalizeRemoteCapabilities(value) {
+    const capabilities = deepFreezeJson(cloneBoundedJson(
+        value,
+        'clean discovery capabilities',
+    ));
+    assertExactKeys(
+        capabilities,
+        MCP_REMOTE_CAPABILITY_KEYS,
+        'clean discovery capabilities',
+    );
+    for (const key of MCP_REMOTE_CAPABILITY_KEYS) {
+        if (!Object.hasOwn(capabilities, key) || typeof capabilities[key] !== 'boolean') {
+            throw new McpEnforcementError(
+                'MCP_REMOTE_CAPABILITY_PROFILE_REJECTED',
+                `Clean discovery must declare ${key} as an exact boolean`,
+            );
+        }
+    }
+    return capabilities;
+}
+
+function localCapabilitiesForRemote(capabilities) {
+    return Object.freeze(Object.fromEntries(
+        MCP_REMOTE_CAPABILITY_KEYS
+            .filter((key) => capabilities[key] === true)
+            .map((key) => [key, Object.freeze({})]),
+    ));
+}
+
+function assertNoImportedMcpAppContent(value, phase) {
+    function reject(reason) {
+        throw new McpEnforcementError(
+            'MCP_ACTIVE_CONTENT_REJECTED',
+            `Clean-imported ${phase} result contains ${reason}; MCP Apps and active documents are disabled`,
+        );
+    }
+
+    function walk(current, parentKey = null) {
+        if (!current || typeof current !== 'object') return;
+        if (Array.isArray(current)) {
+            current.forEach((child) => walk(child, parentKey));
+            return;
+        }
+
+        const normalizedParentKey = normalizeImportedContentKey(parentKey ?? '');
+        for (const [key, child] of Object.entries(current)) {
+            const normalizedKey = normalizeImportedContentKey(key);
+            if (MCP_APP_METADATA_KEYS.has(normalizedKey)
+                || (normalizedParentKey === 'meta' && normalizedKey === 'ui')) {
+                reject('MCP App UI metadata');
+            }
+            if ((normalizedKey === 'uri' || normalizedKey.endsWith('resourceuri'))
+                && typeof child === 'string'
+                && /^\s*(?:ui|data|javascript|vbscript|blob):/i.test(child)) {
+                reject('an active or MCP App resource reference');
+            }
+            if (['mimetype', 'mediatype', 'contenttype'].includes(normalizedKey)
+                && isMcpAppOrActiveDocumentMediaType(child)) {
+                reject('an active HTML or MCP App media type');
+            }
+        }
+
+        const typedTextContent = current.type === 'text' && typeof current.text === 'string';
+        const resourceContent = typeof current.uri === 'string'
+            && (typeof current.text === 'string' || typeof current.blob === 'string');
+        if ((typedTextContent || resourceContent) && containsActiveHtmlMarkup(current.text)) {
+            reject('active HTML markup');
+        }
+        if (resourceContent && typeof current.blob === 'string') {
+            const decoded = decodeCanonicalBase64(current.blob);
+            if (decoded === null) reject('non-canonical binary resource content');
+            if (containsActiveMarkupBytes(decoded)) reject('base64-encoded active HTML markup');
+        }
+        if (current.type === 'image' && typeof current.data === 'string') {
+            const decoded = decodeCanonicalBase64(current.data);
+            if (decoded === null) reject('non-canonical image content');
+            if (containsActiveMarkupBytes(decoded)) reject('base64-encoded active image markup');
+        }
+
+        for (const [key, child] of Object.entries(current)) walk(child, key);
+    }
+
+    walk(value);
+}
+
+function sha256Ref(value) {
+    return `sha256:${crypto.createHash('sha256').update(stableJson(value)).digest('hex')}`;
+}
+
+function assertCanonicalEvidenceRef(evidenceRef, field = 'evidenceRef') {
+    if (typeof evidenceRef !== 'string'
+        || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,499}$/.test(evidenceRef)) {
+        throw new TypeError(`${field} must be a canonical evidence reference`);
+    }
+    if (containsCredentialMaterial(evidenceRef)) {
+        throw new McpEnforcementError(
+            'MCP_CREDENTIAL_MATERIAL_REJECTED',
+            `${field} must not contain credential material`,
+        );
+    }
+    return evidenceRef;
+}
+
+function computeMcpCleanImportEvidenceHash(requestHash, result, evidenceRef) {
+    if (!/^sha256:[a-f0-9]{64}$/.test(requestHash)) {
+        throw new TypeError('requestHash must be a sha256 reference');
+    }
+    const canonicalEvidenceRef = assertCanonicalEvidenceRef(evidenceRef);
+    return sha256Ref({
+        evidence_ref: canonicalEvidenceRef,
+        request_hash: requestHash,
+        result,
+    });
+}
+
+function normalizeRemoteTarget(value, { allowQuery = false } = {}) {
+    let url;
+    try {
+        url = new URL(value);
+    } catch {
+        throw new TypeError('remoteUrl must be an absolute HTTP(S) URL');
+    }
+    if (!['http:', 'https:'].includes(url.protocol)
+        || url.username
+        || url.password
+        || url.hash
+        || (!allowQuery && url.search)) {
+        throw new TypeError(
+            'remoteUrl must be an absolute credential-free HTTP(S) URL without query, fragment, or userinfo',
+        );
+    }
+    let decodedPathname;
+    try {
+        decodedPathname = decodeURIComponent(url.pathname);
+    } catch {
+        throw new TypeError('remoteUrl path encoding is invalid');
+    }
+    if ([url.hostname, url.pathname, decodedPathname].some(containsCredentialMaterial)) {
+        throw new McpEnforcementError(
+            'MCP_CREDENTIAL_MATERIAL_REJECTED',
+            'remoteUrl must not contain credential material',
+        );
+    }
+    for (const [key, entry] of url.searchParams) {
+        if (credentialKeyClassification(key).sensitive
+            || containsCredentialMaterial(key)
+            || containsCredentialMaterial(entry)) {
+            throw new McpEnforcementError(
+                'MCP_CREDENTIAL_MATERIAL_REJECTED',
+                'remoteUrl must not contain credential material',
+            );
+        }
+    }
+    return Object.freeze({ href: url.href, origin: url.origin });
+}
+
+function enforcementRequired(message = 'A factory-created MCP enforcement host capability is required') {
+    return new McpEnforcementError('MCP_RISK_FORK_ENFORCEMENT_REQUIRED', message);
+}
+
+function requireEnforcementBoundary(boundary) {
+    const adapter = enforcementBoundaryAdapters.get(boundary);
+    if (!adapter) throw enforcementRequired();
+    return adapter;
+}
+
+function normalizeHostTimeouts(value = {}) {
+    assertExactKeys(
+        value,
+        ['open_session_ms', 'request_ms', 'close_ms', 'fallback_ms'],
+        'MCP enforcement host timeouts',
+    );
+    return Object.freeze(Object.fromEntries(Object.entries(DEFAULT_HOST_TIMEOUTS).map(
+        ([key, fallback]) => {
+            const candidate = value[key] ?? fallback;
+            if (!Number.isSafeInteger(candidate)
+                || candidate < MIN_HOST_TIMEOUT_MS
+                || candidate > MAX_HOST_TIMEOUT_MS) {
+                throw new TypeError(
+                    `MCP enforcement host timeout ${key} must be an integer from ${MIN_HOST_TIMEOUT_MS} to ${MAX_HOST_TIMEOUT_MS}`,
+                );
+            }
+            return [key, candidate];
+        },
+    )));
+}
+
+function startHostInvocation(callback, timeoutMs, operation, ...args) {
+    const controller = new AbortController();
+    const deadlineAt = new Date(Date.now() + timeoutMs).toISOString();
+    let timer;
+    let removeAbortListener = () => {};
+    const timeout = new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+            const error = new McpEnforcementError(
+                'MCP_ENFORCEMENT_HOST_DEADLINE_EXCEEDED',
+                `MCP enforcement host ${operation} exceeded its ${timeoutMs}ms deadline`,
+            );
+            controller.abort(error);
+            reject(error);
+        }, timeoutMs);
+    });
+    const aborted = new Promise((_resolve, reject) => {
+        const onAbort = () => {
+            reject(controller.signal.reason ?? new McpEnforcementError(
+                'MCP_ENFORCEMENT_HOST_ABORTED',
+                `MCP enforcement host ${operation} was aborted`,
+            ));
+        };
+        controller.signal.addEventListener('abort', onAbort, { once: true });
+        removeAbortListener = () => controller.signal.removeEventListener('abort', onAbort);
+    });
+    const context = Object.freeze({
+        signal: controller.signal,
+        timeout_ms: timeoutMs,
+        deadline_at: deadlineAt,
+        operation,
+    });
+    const pending = Promise.race([
+        Promise.resolve().then(() => callback(...args, context)),
+        timeout,
+        aborted,
+    ]).finally(() => {
+        clearTimeout(timer);
+        removeAbortListener();
+    });
+    return Object.freeze({
+        promise: pending,
+        abort(reason) {
+            if (!controller.signal.aborted) controller.abort(reason);
+        },
+    });
+}
+
+async function invokeHostWithDeadline(callback, timeoutMs, operation, ...args) {
+    return startHostInvocation(callback, timeoutMs, operation, ...args).promise;
+}
+
+async function openHostSessionWithDeadline(adapter, openRequest) {
+    let late = false;
+    const pending = Promise.resolve().then(() => adapter.openSession(openRequest, Object.freeze({
+        signal: controller.signal,
+        timeout_ms: adapter.timeouts.open_session_ms,
+        deadline_at: new Date(Date.now() + adapter.timeouts.open_session_ms).toISOString(),
+        operation: 'openSession',
+    })));
+    const controller = new AbortController();
+    let timer;
+    const timeout = new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+            late = true;
+            const error = new McpEnforcementError(
+                'MCP_ENFORCEMENT_HOST_DEADLINE_EXCEEDED',
+                `MCP enforcement host openSession exceeded its ${adapter.timeouts.open_session_ms}ms deadline`,
+            );
+            controller.abort(error);
+            reject(error);
+        }, adapter.timeouts.open_session_ms);
+    });
+    pending.then(async (session) => {
+        if (!late) return;
+        const descriptor = session && typeof session === 'object'
+            ? Object.getOwnPropertyDescriptor(session, 'close')
+            : null;
+        if (descriptor?.enumerable && !descriptor.get && !descriptor.set
+            && typeof descriptor.value === 'function') {
+            await invokeHostWithDeadline(
+                descriptor.value.bind(session),
+                adapter.timeouts.close_ms,
+                'lateOpenSessionClose',
+            ).catch(() => {});
+        }
+    }).catch(() => {});
+    try {
+        return await Promise.race([pending, timeout]);
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+function normalizeToolAnnotations(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return Object.freeze({
+            raw: null,
+            complete: false,
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true,
+        });
+    }
+    const raw = deepFreezeJson(cloneBoundedJson(value, 'remote tool annotations'));
+    const keys = Object.keys(raw);
+    const complete = TOOL_ANNOTATION_KEYS.every(
+        (key) => Object.hasOwn(raw, key) && typeof raw[key] === 'boolean',
+    ) && keys.every((key) => TOOL_ANNOTATION_KEYS.includes(key));
+    return Object.freeze({
+        raw,
+        complete,
+        readOnlyHint: raw.readOnlyHint === true,
+        destructiveHint: raw.destructiveHint === true,
+        idempotentHint: raw.idempotentHint === true,
+        openWorldHint: raw.openWorldHint !== false,
+    });
+}
+
+function normalizeToolCapabilities(descriptor) {
+    const direct = descriptor.capabilities ?? null;
+    const metadata = descriptor._meta && typeof descriptor._meta === 'object'
+        && !Array.isArray(descriptor._meta)
+        ? descriptor._meta['agoragentic/risk-capabilities'] ?? null
+        : null;
+    if (direct !== null && metadata !== null && sha256Ref(direct) !== sha256Ref(metadata)) {
+        throw new McpEnforcementError(
+            'MCP_REMOTE_TOOL_CAPABILITIES_AMBIGUOUS',
+            `Remote tool ${descriptor.name} supplies conflicting capability declarations`,
+        );
+    }
+    const raw = direct ?? metadata;
+    const plain = raw && typeof raw === 'object' && !Array.isArray(raw);
+    const rawKeys = plain ? Object.keys(raw) : [];
+    const complete = plain
+        && TOOL_CAPABILITY_KEYS.every(
+            (key) => Object.hasOwn(raw, key) && typeof raw[key] === 'boolean',
+        )
+        && rawKeys.every((key) => TOOL_CAPABILITY_KEYS.includes(key));
+    const capabilities = Object.fromEntries(TOOL_CAPABILITY_KEYS.map((key) => [
+        key,
+        key === 'unknown_or_unclassified'
+            ? !complete || raw?.[key] === true
+            : complete && raw[key] === true,
+    ]));
+    return Object.freeze({ raw: plain ? deepFreezeJson(cloneBoundedJson(raw)) : null, complete, capabilities });
+}
+
+function bindRemoteToolDescriptor(value, field = 'remote tool descriptor') {
+    const descriptor = deepFreezeJson(cloneBoundedJson(value, field));
+    assertPlainRecord(descriptor, field);
+    if (typeof descriptor.name !== 'string'
+        || descriptor.name.length < 1
+        || descriptor.name.length > 500
+        || descriptor.name.includes('\0')) {
+        throw new TypeError(`${field}.name is invalid`);
+    }
+    const annotations = normalizeToolAnnotations(descriptor.annotations);
+    const capabilityRecord = normalizeToolCapabilities(descriptor);
+    const irreversibleCapability = TOOL_CAPABILITY_KEYS.some(
+        (key) => IRREVERSIBLE_TOOL_CAPABILITIES.has(key)
+            && capabilityRecord.capabilities[key] === true,
+    );
+    const unknownEffect = !annotations.complete
+        || !capabilityRecord.complete
+        || capabilityRecord.capabilities.unknown_or_unclassified === true;
+    const effectStatus = annotations.destructiveHint || irreversibleCapability
+        ? 'irreversible'
+        : unknownEffect || annotations.readOnlyHint !== true
+            ? 'unknown_effectfulness'
+            : 'explicit_read_only';
+    return deepFreezeJson({
+        descriptor,
+        descriptor_hash: sha256Ref(descriptor),
+        annotations: annotations.raw,
+        capabilities: capabilityRecord.capabilities,
+        effect_status: effectStatus,
+    });
+}
+
+function riskProfileFor(phase, toolName = null, toolBinding = null) {
+    const irreversible = phase === 'tools/call'
+        && (IRREVERSIBLE_TOOLS.has(toolName)
+            || !toolBinding
+            || ['irreversible', 'unknown_effectfulness'].includes(toolBinding.effect_status));
+    return Object.freeze({
+        minimum_level: irreversible ? 'IRREVERSIBLE' : 'HIGH',
+        untrusted_content: true,
+        prepare_only: irreversible,
+    });
+}
+
+function transportConstraints() {
+    return Object.freeze({
+        direct_network_permitted: false,
+        https_required: true,
+        address_scope: 'public_unicast_only',
+        dns_resolution: 'child_before_each_connection_attempt',
+        address_pinning_required: true,
+        proxy_environment_allowed: false,
+        redirects: 'error',
+        max_redirects: 0,
+        transport_evidence_required: true,
+        response_acceptance: 'clean_import_only',
+        fallback_on_protocol_error: false,
+        credential_material_in_child: false,
+    });
+}
+
+function stripOpaqueMcpMetadata(params, field) {
+    const cloned = cloneBoundedJson(params, field);
+    assertPlainRecord(cloned, field);
+    if (!Object.hasOwn(cloned, '_meta')) return deepFreezeJson(cloned);
+    assertPlainRecord(cloned._meta, `${field}._meta`);
+    const { _meta: ignoredOpaqueMetadata, ...withoutMetadata } = cloned;
+    return deepFreezeJson(withoutMetadata);
+}
+
+function buildEnforcementRequest({
+    schema,
+    phase,
+    remoteUrl,
+    params = {},
+    toolName = null,
+    toolDescriptor = null,
+    sessionBindingHash = null,
+    extra = {},
+}) {
+    if (!MCP_PHASES.has(phase)) throw new TypeError(`Unsupported MCP enforcement phase: ${phase}`);
+    const target = normalizeRemoteTarget(remoteUrl, {
+        allowQuery: schema === MCP_ENFORCEMENT_SCHEMAS.fallbackRequest,
+    });
+    const safeParams = cloneBoundedJson(params, 'MCP enforcement params');
+    assertPlainRecord(safeParams, 'MCP enforcement params');
+    assertNoCredentialMaterial(safeParams, 'MCP enforcement params');
+    const safeExtra = cloneBoundedJson(extra, 'MCP enforcement metadata');
+    assertExactKeys(safeExtra, ['raw_method', 'fallback_http'], 'MCP enforcement metadata');
+    assertNoCredentialMaterial(safeExtra, 'MCP enforcement metadata');
+    const rawMethod = phase === 'UNKNOWN' ? String(safeExtra.raw_method || '') : null;
+    const toolBinding = phase === 'tools/call'
+        ? bindRemoteToolDescriptor(toolDescriptor, 'bound remote tool descriptor')
+        : null;
+    if (phase === 'tools/call' && toolBinding.descriptor.name !== toolName) {
+        throw new McpEnforcementError(
+            'MCP_REMOTE_TOOL_DESCRIPTOR_SUBSTITUTED',
+            'Bound remote tool descriptor does not match the requested tool name',
+        );
+    }
+    const request = {
+        schema,
+        request_id: `mcp-enforcement:${crypto.randomUUID()}`,
+        phase,
+        raw_method: rawMethod,
+        mcp_server_ref: target.href,
+        mcp_server_origin: target.origin,
+        session_binding_hash: sessionBindingHash,
+        tool_name: toolName,
+        tool_descriptor: toolBinding?.descriptor ?? null,
+        tool_descriptor_hash: toolBinding?.descriptor_hash ?? null,
+        tool_annotations: toolBinding?.annotations ?? null,
+        tool_capabilities: toolBinding?.capabilities ?? null,
+        tool_effect_status: toolBinding?.effect_status ?? null,
+        params: safeParams,
+        risk_profile: riskProfileFor(phase, toolName, toolBinding),
+        transport_constraints: transportConstraints(),
+        fallback_http: safeExtra.fallback_http ?? null,
+        request_hash: null,
+    };
+    if (phase === 'UNKNOWN' && !request.raw_method) {
+        throw new TypeError('UNKNOWN MCP enforcement requests require raw_method');
+    }
+    request.request_hash = sha256Ref({ ...request, request_hash: null });
+    if (sessionBindingHash !== null && !/^sha256:[a-f0-9]{64}$/.test(sessionBindingHash)) {
+        throw new TypeError('sessionBindingHash must be a sha256 reference');
+    }
+    return deepFreezeJson(request);
+}
+
+function verifyCleanImportedEnvelope(value, request) {
+    const imported = deepFreezeJson(cloneBoundedJson(value, 'clean imported result'));
+    assertNoCredentialMaterial(imported, 'clean imported result', { phase: request.phase });
+    assertExactKeys(imported, [
+        'schema',
+        'request_id',
+        'request_hash',
+        'phase',
+        'clean_imported',
+        'authority_granted',
+        'evidence_ref',
+        'evidence_hash',
+        'result',
+    ], 'clean imported result');
+    if (imported.schema !== MCP_ENFORCEMENT_SCHEMAS.cleanImportedResult
+        || imported.request_id !== request.request_id
+        || imported.request_hash !== request.request_hash
+        || imported.phase !== request.phase
+        || imported.clean_imported !== true
+        || imported.authority_granted !== false) {
+        throw new McpEnforcementError(
+            'MCP_RISK_FORK_IMPORT_INVALID',
+            'The host did not return an exact clean-imported result for this request',
+        );
+    }
+    assertNoImportedMcpAppContent(imported.result, request.phase);
+    assertCanonicalEvidenceRef(imported.evidence_ref, 'clean imported result.evidence_ref');
+    if (!/^sha256:[a-f0-9]{64}$/.test(imported.evidence_hash)) {
+        throw new TypeError('clean imported result.evidence_hash is invalid');
+    }
+    const expectedEvidenceHash = computeMcpCleanImportEvidenceHash(
+        request.request_hash,
+        imported.result,
+        imported.evidence_ref,
+    );
+    if (imported.evidence_hash !== expectedEvidenceHash) {
+        throw new McpEnforcementError(
+            'MCP_RISK_FORK_IMPORT_INVALID',
+            'The clean-import evidence hash does not bind this request and result',
+        );
+    }
+    return imported;
+}
+
+function verifyCleanImportedResult(value, request) {
+    return verifyCleanImportedEnvelope(value, request).result;
+}
+
+function createMcpEnforcementBoundary(hostAdapter = {}) {
+    assertExactKeys(hostAdapter, ['openSession', 'executeFallback', 'timeouts'], 'MCP enforcement host adapter');
+    if (typeof hostAdapter.openSession !== 'function' || typeof hostAdapter.executeFallback !== 'function') {
+        throw new TypeError('MCP enforcement host adapter requires openSession and executeFallback functions');
+    }
+    const timeouts = normalizeHostTimeouts(hostAdapter.timeouts);
+    const boundary = Object.freeze({
+        schema: MCP_ENFORCEMENT_SCHEMAS.boundary,
+        mode: 'host_owns_network_and_clean_import',
+    });
+    enforcementBoundaryAdapters.set(boundary, Object.freeze({
+        openSession: hostAdapter.openSession.bind(hostAdapter),
+        executeFallback: hostAdapter.executeFallback.bind(hostAdapter),
+        timeouts,
+    }));
+    return boundary;
+}
+
+function isMcpEnforcementBoundary(value) {
+    return enforcementBoundaryAdapters.has(value);
+}
+
+const ACP_ENFORCEMENT_NOTE = ' Network execution is fail-closed unless an embedding host supplies a separately qualified enforcement implementation.';
+const ACP_TOOLS = [
+    {
+        name: 'agoragentic_execute',
+        description: `Route a task through Agent OS execute() with provider selection, fallback, receipts, and settlement.${ACP_ENFORCEMENT_NOTE}`,
+    },
+    {
+        name: 'agoragentic_match',
+        description: `Preview routed providers before execution.${ACP_ENFORCEMENT_NOTE}`,
+    },
+    {
+        name: 'agoragentic_quote',
+        description: `Create a bounded quote before paid execution.${ACP_ENFORCEMENT_NOTE}`,
+    },
+    {
+        name: 'agoragentic_status',
+        description: `Inspect execution status for an invocation.${ACP_ENFORCEMENT_NOTE}`,
+    },
+    {
+        name: 'agoragentic_receipt',
+        description: `Fetch normalized receipt and settlement metadata.${ACP_ENFORCEMENT_NOTE}`,
+    },
+    {
+        name: 'agoragentic_browse_services',
+        description: `Browse stable x402 edge resources.${ACP_ENFORCEMENT_NOTE}`,
+    },
+    {
+        name: 'agoragentic_call_service',
+        description: `Call a stable x402 edge resource after payment challenge handling.${ACP_ENFORCEMENT_NOTE}`,
+    },
+    {
+        name: 'agoragentic_edge_receipt',
+        description: `Inspect x402 edge receipt metadata.${ACP_ENFORCEMENT_NOTE}`,
+    },
+    {
+        name: 'agoragentic_x402_test',
+        description: `Exercise the free x402 pipeline canary.${ACP_ENFORCEMENT_NOTE}`,
+    },
+];
+const ACP_TOOL_NAMES = new Set(ACP_TOOLS.map((tool) => tool.name));
+
+function buildJsonContent(data) {
+    return {
+        content: [
+            {
+                type: 'text',
+                text: typeof data === 'string' ? data : JSON.stringify(data, null, 2),
+            },
+        ],
+    };
+}
+
+function buildFallbackToolList() {
+    return [
+        {
+            name: 'agoragentic_register',
+            description:
+                'Register a new agent with the Agoragentic marketplace through an enforcement host. ' +
+                'Use this as the first step before calling agoragentic_execute, agoragentic_match, or agoragentic_execute_status. ' +
+                'Registration is expected to be idempotent for the same agent name, but the enforcement host must consume any returned credential before clean import. ' +
+                'The package rejects raw credentials in clean-imported results; a qualified host must store any returned secret out of band and expose only a non-authority reference. ' +
+                'Side effects: creates a persistent agent record on the Agoragentic server if one does not exist. ' +
+                'Returns clean-imported agent metadata only after host enforcement. ' +
+                'On error, returns JSON with ok:false and an error message string.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    name: { type: 'string', description: 'Human-readable agent name, e.g. "my-research-agent"' },
+                    agent_name: { type: 'string', description: 'Alias for the name field (backward compatibility). Prefer using name instead.' },
+                    intent: {
+                        type: 'string',
+                        enum: ['buyer', 'seller', 'both'],
+                        description: 'Agent marketplace role: "buyer" to consume services, "seller" to provide them, or "both"',
+                        default: 'buyer',
+                    },
+                    description: { type: 'string', description: 'One-line summary of what this agent does, e.g. "Summarizes web pages on demand"' },
+                },
+            },
+        },
+        {
+            name: 'agoragentic_search',
+            description:
+                'Search the public Agoragentic marketplace for available agent capabilities and services. ' +
+                'Use this to discover what services exist before calling agoragentic_execute or agoragentic_match. ' +
+                'This is a read-only operation with no side effects and no USDC spend. ' +
+                'Any network call still requires the embedding enforcement host. ' +
+                'Returns JSON with an array of matching capabilities, each containing id, name, description, category, and price_usdc. ' +
+                'Returns an empty array when no capabilities match the query.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string', description: 'Free-text search query, e.g. "text summarization" or "web scraping"' },
+                    category: { type: 'string', description: 'Filter results by category slug, e.g. "ai-ml", "data", or "web". Omit to search all categories.' },
+                    limit: { type: 'number', description: 'Maximum number of results to return (1\u2013100)', default: 10 },
+                },
+            },
+        },
+        {
+            name: 'agoragentic_preview_x402',
+            description:
+                'Preview route-first x402-eligible providers for a task WITHOUT registration, provider execution, or USDC spend. ' +
+                'The network preview remains fail-closed unless an embedding host supplies a separately qualified enforcement implementation. ' +
+                'Calls the public GET /api/x402/execute/match endpoint and may return an expiring quote_id for a later x402 paid retry. ' +
+                'Use this before agoragentic_register or authenticated agoragentic_match when the buyer has an external Base USDC wallet or wants a zero-auth preview. ' +
+                'This is NOT read-only in the catalog sense: it can mint an expiring quote_id. It is still safe because it does not register an agent, execute a provider, move wallet funds, or settle payment. ' +
+                'Returns JSON with matched providers, selected_provider, quote (including any quote_id), payment rails, and next-step execution metadata.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    task: { type: 'string', description: 'Natural-language task to preview, e.g. "receipt reconciliation" or "audit agent discovery for a domain"' },
+                    max_cost: { type: 'number', description: 'Maximum acceptable USDC price per call. Defaults server-side when omitted.' },
+                    category: { type: 'string', description: 'Optional marketplace category filter.' },
+                    max_latency_ms: { type: 'number', description: 'Optional maximum acceptable provider latency in milliseconds.' },
+                    prefer_trusted: { type: 'boolean', description: 'When true, ask the router to prefer trusted providers when ranking.', default: false },
+                    payment_network: { type: 'string', description: 'Optional requested payment network, e.g. "base" or "eip155:8453".' },
+                    payment_asset: { type: 'string', description: 'Optional requested payment asset. Defaults to USDC server-side.' },
+                },
+                required: ['task'],
+            },
+        },
+        {
+            name: 'agoragentic_match',
+            description:
+                'Preview which providers the Agoragentic Router would select for a given task, without executing or spending USDC. ' +
+                'Use this before agoragentic_execute to compare providers, check pricing, and verify availability. ' +
+                'This is a read-only, non-destructive operation with no side effects. ' +
+                'Any required credential must be resolved out of band by the embedding enforcement host; it is never included in the request descriptor or imported result. ' +
+                'Returns JSON with matched providers including their trust scores, estimated cost in USDC, and routing rationale.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    task: { type: 'string', description: 'Natural-language task description to match against providers, e.g. "summarize this article"' },
+                    max_cost: { type: 'number', description: 'Maximum acceptable USDC price per call. Providers above this price are excluded from results.' },
+                    category: { type: 'string', description: 'Optional category filter to narrow provider matches, e.g. "ai-ml"' },
+                    prefer_trusted: { type: 'boolean', description: 'When true, rank verified and trusted providers higher in results', default: true },
+                },
+                required: ['task'],
+            },
+        },
+        {
+            name: 'agoragentic_execute',
+            description:
+                'Execute a task through the Agoragentic Router / Marketplace. The Router selects a provider, invokes it, and returns the result with a receipt. ' +
+                'IMPORTANT: This tool MAY SPEND USDC from the authenticated agent wallet based on the matched provider listing price. ' +
+                'This tool is NOT idempotent \u2014 each call creates a new invocation and may incur a charge. ' +
+                'Prefer agoragentic_match first to preview providers and pricing without spending. ' +
+                'Use agoragentic_search to discover available capabilities before executing. ' +
+                'Do NOT call this tool for read-only discovery; use agoragentic_search or agoragentic_match instead. ' +
+                'Any required credential must be resolved out of band by the embedding enforcement host; it is never included in the request descriptor or imported result. ' +
+                'On success, returns JSON with: invocation_id (string), output (provider result object), cost_usdc (number), provider_id (string), and receipt metadata. ' +
+                'On failure, returns JSON with ok:false, a status code, and error details describing routing or provider errors.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    task: {
+                        type: 'string',
+                        description: 'Natural-language task for the Router to match and execute, e.g. "summarize this article" or "scrape https://example.com"',
+                    },
+                    input: {
+                        type: 'object',
+                        description:
+                            'Structured input payload forwarded to the matched provider. Shape depends on the provider API. ' +
+                            'Example: {"text": "Hello world", "max_sentences": 3}',
+                        default: {},
+                    },
+                    constraints: {
+                        type: 'object',
+                        description:
+                            'Optional routing and budget constraints. Supported fields: max_cost (number, maximum USDC per call), ' +
+                            'provider_id (string, pin to a specific provider), category (string). ' +
+                            'Example: {"max_cost": 0.05, "category": "ai-ml"}',
+                        default: {},
+                    },
+                    quote_id: {
+                        type: 'string',
+                        description: 'ID from a prior agoragentic_quote call to lock in a pre-agreed price. Omit for standard dynamic pricing.',
+                    },
+                    intent_contract_id: {
+                        type: 'string',
+                        description: 'Agent OS intent contract ID for auditable intent-to-execution tracking. Omit if not using intent contracts.',
+                    },
+                },
+                required: ['task'],
+            },
+        },
+        {
+            name: 'agoragentic_execute_status',
+            description:
+                'Check the status, output, cost, and receipt of a previous agoragentic_execute invocation. ' +
+                'Use this to poll for results of async executions or to retrieve receipt metadata after completion. ' +
+                'This is a read-only operation with no side effects and no USDC spend. ' +
+                'Any required credential must be resolved out of band by the embedding enforcement host; it is never included in the request descriptor or imported result. ' +
+                'Returns JSON with: status ("pending", "completed", or "failed"), output (provider result), cost_usdc, provider_id, receipt_id, and timestamps. ' +
+                'Returns ok:false with error "invalid_invocation_id" unless the ID is a 1-256 character ASCII string containing only letters, digits, hyphens, or underscores.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    invocation_id: {
+                        type: 'string',
+                        minLength: 1,
+                        maxLength: 256,
+                        pattern: '^[A-Za-z0-9_-]{1,256}$',
+                        description: 'The invocation_id string returned by a prior agoragentic_execute call, e.g. "inv_abc123def456"',
+                    },
+                },
+                required: ['invocation_id'],
+            },
+        },
+    ];
+}
+
+function mergeFallbackTools(remoteTools = []) {
+    const seen = new Set(remoteTools.map((tool) => tool.name));
+    const merged = [...remoteTools];
+    for (const tool of buildFallbackToolList()) {
+        if (!seen.has(tool.name)) {
+            merged.push(tool);
+        }
+    }
+    return merged;
+}
+
+function validateRemoteToolListPage(result, field = 'clean tools/list result') {
+    assertPlainRecord(result, field);
+    if (!Array.isArray(result.tools)) {
+        throw new TypeError(`${field}.tools must be an array`);
+    }
+    const names = new Set();
+    const bindings = result.tools.map((tool, index) => {
+        const binding = bindRemoteToolDescriptor(tool, `${field}.tools[${index}]`);
+        if (names.has(binding.descriptor.name)) {
+            throw new McpEnforcementError(
+                'MCP_REMOTE_TOOL_DIRECTORY_AMBIGUOUS',
+                `Remote tools/list page contains duplicate tool name ${binding.descriptor.name}`,
+            );
+        }
+        names.add(binding.descriptor.name);
+        return binding;
+    });
+    let nextCursor = null;
+    if (result.nextCursor !== undefined && result.nextCursor !== null) {
+        if (typeof result.nextCursor !== 'string'
+            || result.nextCursor.length < 1
+            || result.nextCursor.length > MAX_REMOTE_TOOL_CURSOR_LENGTH) {
+            throw new TypeError(`${field}.nextCursor is invalid`);
+        }
+        nextCursor = result.nextCursor;
+    }
+    return {
+        names: [...names],
+        nextCursor,
+        tools: bindings.map((binding) => binding.descriptor),
+        bindings,
+    };
+}
+
+function bindRemoteToolDirectorySnapshot(sessionRecord, bindings) {
+    const byName = new Map();
+    for (const binding of bindings) {
+        const name = binding.descriptor.name;
+        if (byName.has(name)) {
+            throw new McpEnforcementError(
+                'MCP_REMOTE_TOOL_DIRECTORY_AMBIGUOUS',
+                `Remote tools/list pagination contains duplicate tool name ${name}`,
+            );
+        }
+        byName.set(name, binding);
+    }
+    const directoryHash = sha256Ref([...byName.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([name, binding]) => ({ name, descriptor_hash: binding.descriptor_hash })));
+    if (sessionRecord.remoteToolDirectoryHash
+        && sessionRecord.remoteToolDirectoryHash !== directoryHash) {
+        throw new McpEnforcementError(
+            'MCP_REMOTE_TOOL_DESCRIPTOR_DRIFT',
+            'Remote tool descriptors changed after the enforced session was bound',
+        );
+    }
+    if (!sessionRecord.remoteToolDirectoryHash) {
+        sessionRecord.remoteToolDirectoryHash = directoryHash;
+        sessionRecord.remoteToolDescriptors = byName;
+    }
+    return Object.freeze({
+        names: new Set(byName.keys()),
+        tools: Object.freeze([...byName.values()].map((binding) => binding.descriptor)),
+        directory_hash: directoryHash,
+    });
+}
+
+function assertRemoteToolPageMatchesSnapshot(sessionRecord, bindings) {
+    if (!sessionRecord.remoteToolDescriptors) return;
+    for (const binding of bindings) {
+        const expected = sessionRecord.remoteToolDescriptors.get(binding.descriptor.name);
+        if (!expected || expected.descriptor_hash !== binding.descriptor_hash) {
+            throw new McpEnforcementError(
+                'MCP_REMOTE_TOOL_DESCRIPTOR_DRIFT',
+                `Remote tool descriptor drifted for ${binding.descriptor.name}`,
+            );
+        }
+    }
+}
+
+function createRemoteToolDirectory(session) {
+    const sessionRecord = enforcedSessionRecords.get(session);
+    if (!sessionRecord) {
+        throw new TypeError('createRemoteToolDirectory requires an opaque enforced MCP session');
+    }
+    if (!sessionRecord.remoteToolFirstPage) {
+        throw new McpEnforcementError(
+            'MCP_REMOTE_TOOL_DIRECTORY_INCOMPLETE',
+            'The enforced MCP session has no validated initial tool page',
+        );
+    }
+    if (sessionRecord.remoteToolDirectory) return sessionRecord.remoteToolDirectory;
+    async function failIncomplete(message) {
+        try {
+            await session.close();
+        } catch {
+            // Preserve the deterministic directory failure.
+        }
+        throw new McpEnforcementError('MCP_REMOTE_TOOL_DIRECTORY_INCOMPLETE', message);
+    }
+
+    function createDirectoryEpoch(firstResult) {
+        const firstPage = validateRemoteToolListPage(firstResult);
+        let hydrationPromise = null;
+
+        function hydrate() {
+            if (hydrationPromise) return hydrationPromise;
+            hydrationPromise = (async () => {
+                const remoteBindings = [...firstPage.bindings];
+                const remoteTools = [...firstPage.tools];
+                const remoteToolNames = new Set(firstPage.names);
+                let remoteToolBytes = Buffer.byteLength(JSON.stringify(firstPage.tools), 'utf8');
+                let nextCursor = firstPage.nextCursor;
+                if (remoteToolBytes > MAX_REMOTE_TOOL_DIRECTORY_BYTES) {
+                    await failIncomplete('Remote tools/list pagination exceeded the cumulative byte limit');
+                }
+                if (remoteTools.length > MAX_REMOTE_TOOL_DIRECTORY_TOOLS) {
+                    await failIncomplete('Remote tools/list pagination exceeded the tool limit');
+                }
+                const seenCursors = new Set();
+                let fetchedPages = 0;
+                while (nextCursor !== null) {
+                    if (seenCursors.has(nextCursor)) {
+                        await failIncomplete('Remote tools/list pagination repeated a cursor');
+                    }
+                    if (fetchedPages >= MAX_REMOTE_TOOL_DIRECTORY_PAGES) {
+                        await failIncomplete('Remote tools/list pagination exceeded the page limit');
+                    }
+                    const cursor = nextCursor;
+                    seenCursors.add(cursor);
+                    const result = await session.listTools({ cursor });
+                    const page = validateRemoteToolListPage(result);
+                    fetchedPages += 1;
+                    const pageBytes = Buffer.byteLength(JSON.stringify(page.tools), 'utf8');
+                    if (remoteToolBytes + pageBytes > MAX_REMOTE_TOOL_DIRECTORY_BYTES) {
+                        await failIncomplete('Remote tools/list pagination exceeded the cumulative byte limit');
+                    }
+                    remoteTools.push(...page.tools);
+                    for (const binding of page.bindings) {
+                        if (remoteToolNames.has(binding.descriptor.name)) {
+                            await failIncomplete(
+                                `Remote tools/list pagination contains duplicate tool name ${binding.descriptor.name}`,
+                            );
+                        }
+                        remoteBindings.push(binding);
+                    }
+                    remoteToolBytes += pageBytes;
+                    for (const name of page.names) remoteToolNames.add(name);
+                    if (remoteTools.length > MAX_REMOTE_TOOL_DIRECTORY_TOOLS) {
+                        await failIncomplete('Remote tools/list pagination exceeded the tool limit');
+                    }
+                    nextCursor = page.nextCursor;
+                }
+                return bindRemoteToolDirectorySnapshot(sessionRecord, remoteBindings);
+            })();
+            return hydrationPromise;
+        }
+
+        return Object.freeze({ firstResult, hydrate });
+    }
+
+    let currentEpoch = createDirectoryEpoch(sessionRecord.remoteToolFirstPage);
+    let refreshTail = Promise.resolve();
+
+    async function list(params = {}) {
+        const safeParams = deepFreezeJson(cloneBoundedJson(params, 'remote tool directory list params'));
+        assertPlainRecord(safeParams, 'remote tool directory list params');
+        if (safeParams.cursor !== undefined) return session.listTools(safeParams);
+
+        const refresh = refreshTail.then(async () => {
+            const result = await session.listTools(safeParams);
+            const epoch = createDirectoryEpoch(result);
+            currentEpoch = epoch;
+            const snapshot = await epoch.hydrate();
+            const { nextCursor: ignoredNextCursor, ...aggregate } = epoch.firstResult;
+            return {
+                ...aggregate,
+                tools: mergeFallbackTools(snapshot.tools),
+            };
+        });
+        refreshTail = refresh.then(
+            () => undefined,
+            () => undefined,
+        );
+        return refresh;
+    }
+
+    async function has(name) {
+        const epoch = currentEpoch;
+        const snapshot = await epoch.hydrate();
+        return snapshot.names.has(name);
+    }
+
+    const directory = Object.freeze({ has, list, initialize: () => currentEpoch.hydrate() });
+    sessionRecord.remoteToolDirectory = directory;
+    return directory;
+}
+
+const FALLBACK_TOOL_NAMES = new Set(buildFallbackToolList().map((tool) => tool.name));
+
+function buildBlockedToolResult(code, message, details = {}) {
+    return {
+        isError: true,
+        ...buildJsonContent({
+            ok: false,
+            error: code,
+            message,
+            ...details,
+        }),
+    };
+}
+
+async function executeEnforcedFallback(enforcementBoundary, {
+    name,
+    args,
+    method,
+    path,
+    body,
+}) {
+    // The boundary is required for its enforcement side effects; the adapter
+    // itself is unused because every fallback below stays fail-closed.
+    requireEnforcementBoundary(enforcementBoundary);
+    // Every fallback remains unavailable until the host supplies a durable
+    // effect fence with exact idempotency and terminal reconciliation.
+    // AbortSignal/Promise.race cannot prove that a late callback performed no
+    // effect, and preview_x402 mints a quote_id despite its preview name.
+    throw new McpEnforcementError(
+        'MCP_FALLBACK_EFFECT_FENCE_REQUIRED',
+        'MCP fallback is disabled until a durable host effect fence is qualified',
+    );
+}
+
+async function executeFallbackTool(name, args = {}, options = {}) {
+    assertExactKeys(options, ['enforcementBoundary'], 'fallback execution options');
+    const safeArgs = cloneBoundedJson(args, 'fallback tool arguments');
+    const enforcementBoundary = options.enforcementBoundary;
+
+    async function enforced(request) {
+        try {
+            const data = await executeEnforcedFallback(enforcementBoundary, request);
+            return buildJsonContent(data);
+        } catch (error) {
+            if (error?.code === 'MCP_RISK_FORK_ENFORCEMENT_REQUIRED') {
+                return buildBlockedToolResult(
+                    'risk_fork_enforcement_required',
+                    'Fallback network execution is disabled until a factory-created enforcement host capability is installed.',
+                    { tool: name },
+                );
+            }
+            if (error?.code === 'MCP_FALLBACK_EFFECT_FENCE_REQUIRED') {
+                return buildBlockedToolResult(
+                    'risk_fork_effect_fence_required',
+                    'Effect-capable fallback is disabled until a durable host effect fence is qualified.',
+                    { tool: name },
+                );
+            }
+            throw error;
+        }
+    }
+
+    if (name === 'agoragentic_register') {
+        const agentName = safeArgs.agent_name || safeArgs.name || 'mcp-agent';
+        return enforced({
+            name,
+            args: safeArgs,
+            method: 'POST',
+            path: '/api/quickstart',
+            body: {
+            name: agentName,
+                intent: safeArgs.intent || 'buyer',
+                description: safeArgs.description || 'Registered through agoragentic-mcp fallback tools.',
+            },
+        });
+    }
+
+    if (name === 'agoragentic_search') {
+        const params = new URLSearchParams();
+        if (safeArgs.query) params.set('q', safeArgs.query);
+        if (safeArgs.category) params.set('category', safeArgs.category);
+        if (safeArgs.limit !== undefined) params.set('limit', String(safeArgs.limit));
+        const path = `/api/capabilities?${params.toString()}`;
+        return enforced({ name, args: safeArgs, method: 'GET', path });
+    }
+
+    if (name === 'agoragentic_preview_x402') {
+        const task = String(safeArgs.task || '').trim();
+        if (!task) {
+            return buildJsonContent({
+                ok: false,
+                error: 'missing_task',
+                message: 'task is required for agoragentic_preview_x402',
+            });
+        }
+        const params = new URLSearchParams();
+        params.set('task', task);
+        if (safeArgs.max_cost !== undefined) params.set('max_cost', String(safeArgs.max_cost));
+        if (safeArgs.category) params.set('category', safeArgs.category);
+        if (safeArgs.max_latency_ms !== undefined) params.set('max_latency_ms', String(safeArgs.max_latency_ms));
+        if (safeArgs.prefer_trusted !== undefined) params.set('prefer_trusted', safeArgs.prefer_trusted ? 'true' : 'false');
+        if (safeArgs.payment_network) params.set('payment_network', safeArgs.payment_network);
+        if (safeArgs.payment_asset) params.set('payment_asset', safeArgs.payment_asset);
+        const path = `/api/x402/execute/match?${params.toString()}`;
+        return enforced({ name, args: safeArgs, method: 'GET', path });
+    }
+
+    if (name === 'agoragentic_match') {
+        const params = new URLSearchParams();
+        params.set('task', safeArgs.task);
+        if (safeArgs.max_cost !== undefined) params.set('max_cost', String(safeArgs.max_cost));
+        if (safeArgs.category) params.set('category', safeArgs.category);
+        if (safeArgs.prefer_trusted !== undefined) params.set('prefer_trusted', safeArgs.prefer_trusted ? 'true' : 'false');
+        const path = `/api/execute/match?${params.toString()}`;
+        return enforced({ name, args: safeArgs, method: 'GET', path });
+    }
+
+    if (name === 'agoragentic_execute') {
+        const payload = {
+            task: safeArgs.task,
+            input: safeArgs.input || {},
+            constraints: safeArgs.constraints || {},
+        };
+        if (safeArgs.quote_id) payload.quote_id = safeArgs.quote_id;
+        if (safeArgs.intent_contract_id) payload.intent_contract_id = safeArgs.intent_contract_id;
+        return enforced({
+            name,
+            args: safeArgs,
+            method: 'POST',
+            path: '/api/execute',
+            body: payload,
+        });
+    }
+
+    if (name === 'agoragentic_execute_status') {
+        const invocationId = safeArgs.invocation_id;
+        if (typeof invocationId !== 'string'
+            || !CANONICAL_INVOCATION_ID_PATTERN.test(invocationId)) {
+            return buildJsonContent({ ok: false, error: 'invalid_invocation_id' });
+        }
+        const path = `/api/execute/status/${invocationId}`;
+        return enforced({ name, args: safeArgs, method: 'GET', path });
+    }
+
+    return buildJsonContent({
+        ok: false,
+        error: 'unknown_tool',
+        tool: name,
+    });
+}
+
+async function connectRemoteClient(options = {}) {
+    assertExactKeys(
+        options,
+        ['remoteUrl', 'enforcementBoundary', 'riskForkPlanner'],
+        'connectRemoteClient options',
+    );
+    const remoteUrl = options.remoteUrl ?? REMOTE_MCP_URL;
+    const enforcementBoundary = options.enforcementBoundary;
+    const riskForkPlanner = options.riskForkPlanner;
+    if (riskForkPlanner !== undefined) {
+        throw new TypeError(
+            'riskForkPlanner is not a supported enforcement boundary; use createMcpEnforcementBoundary()',
+        );
+    }
+    const adapter = requireEnforcementBoundary(enforcementBoundary);
+    const openRequest = buildEnforcementRequest({
+        schema: MCP_ENFORCEMENT_SCHEMAS.sessionOpenRequest,
+        phase: 'server/discover',
+        remoteUrl,
+        params: {
+            protocol_version: MCP_V2_PROTOCOL_VERSION,
+            stateless_required: true,
+        },
+    });
+    const rawHostSession = await openHostSessionWithDeadline(adapter, openRequest);
+    const closeDescriptor = rawHostSession && typeof rawHostSession === 'object'
+        ? Object.getOwnPropertyDescriptor(rawHostSession, 'close')
+        : null;
+    const emergencyClose = closeDescriptor?.enumerable
+        && !closeDescriptor.get
+        && !closeDescriptor.set
+        && typeof closeDescriptor.value === 'function'
+        ? closeDescriptor.value.bind(rawHostSession)
+        : null;
+    let hostSession;
+    let discoveryEnvelope;
+    let discovery;
+    let remoteCapabilities;
+    try {
+        assertExactKeys(
+            rawHostSession,
+            ['schema', 'discovery', 'request', 'close'],
+            'enforced MCP host session',
+        );
+        if (rawHostSession.schema !== MCP_ENFORCEMENT_SCHEMAS.hostSession
+            || typeof rawHostSession.request !== 'function'
+            || typeof rawHostSession.close !== 'function') {
+            throw new McpEnforcementError(
+                'MCP_RISK_FORK_SESSION_INVALID',
+                'The enforcement host did not return the closed enforced-session contract',
+            );
+        }
+        hostSession = Object.freeze({
+            discovery: rawHostSession.discovery,
+            request: rawHostSession.request.bind(rawHostSession),
+            close: rawHostSession.close.bind(rawHostSession),
+        });
+        discoveryEnvelope = verifyCleanImportedEnvelope(hostSession.discovery, openRequest);
+        discovery = discoveryEnvelope.result;
+        assertExactKeys(
+            discovery,
+            ['protocol_version', 'stateless', 'capabilities'],
+            'clean discovery result',
+        );
+        if (!Object.hasOwn(discovery, 'capabilities')) {
+            throw new McpEnforcementError(
+                'MCP_REMOTE_CAPABILITY_PROFILE_REJECTED',
+                'Clean discovery result.capabilities is required',
+            );
+        }
+        if (discovery.protocol_version !== MCP_V2_PROTOCOL_VERSION || discovery.stateless !== true) {
+            throw new McpEnforcementError(
+                'MCP_REMOTE_NEGOTIATION_REJECTED',
+                `Hosted MCP did not establish an enforced stateless ${MCP_V2_PROTOCOL_VERSION} connection`,
+            );
+        }
+        remoteCapabilities = normalizeRemoteCapabilities(discovery.capabilities);
+    } catch (error) {
+        try {
+            if (emergencyClose) {
+                await invokeHostWithDeadline(
+                    emergencyClose,
+                    adapter.timeouts.close_ms,
+                    'emergencyClose',
+                );
+            }
+        } catch {
+            // Preserve the fail-closed session/import error.
+        }
+        throw error;
+    }
+
+    let session;
+    const record = {
+        remote_url: openRequest.mcp_server_ref,
+        remote_origin: openRequest.mcp_server_origin,
+        session_binding_hash: sha256Ref({
+            open_request_hash: openRequest.request_hash,
+            discovery_evidence_hash: discoveryEnvelope.evidence_hash,
+            discovery_result_hash: sha256Ref(discovery),
+            capabilities_hash: sha256Ref(remoteCapabilities),
+            protocol_version: discovery.protocol_version,
+            stateless: discovery.stateless,
+        }),
+        remoteCapabilities,
+        hostRequest: hostSession.request,
+        hostClose: hostSession.close,
+        closed: false,
+        closePromise: null,
+        activeRequests: new Set(),
+        remoteToolFirstPage: null,
+        remoteToolDescriptors: null,
+        remoteToolDirectoryHash: null,
+        remoteToolDirectory: null,
+        timeouts: adapter.timeouts,
+    };
+
+    function close() {
+        const current = enforcedSessionRecords.get(session);
+        if (!current) return Promise.resolve();
+        if (current.closePromise) return current.closePromise;
+        current.closed = true;
+        const closedError = new McpEnforcementError(
+            'MCP_ENFORCED_SESSION_CLOSED',
+            'The enforced MCP session closed while a host request was pending',
+        );
+        const activeRequests = [...current.activeRequests];
+        for (const activeRequest of activeRequests) activeRequest.abort(closedError);
+        const hostClose = invokeHostWithDeadline(
+            current.hostClose,
+            current.timeouts.close_ms,
+            'close',
+        );
+        current.closePromise = Promise.all([
+            Promise.allSettled(activeRequests.map((activeRequest) => activeRequest.promise)),
+            hostClose,
+        ]).then(([, result]) => result);
+        return current.closePromise;
+    }
+
+    async function request(phase, params = {}) {
+        const current = enforcedSessionRecords.get(session);
+        if (!current || current.closed) {
+            throw new McpEnforcementError('MCP_ENFORCED_SESSION_CLOSED', 'The enforced MCP session is closed');
+        }
+        const capability = phase.split('/')[0];
+        if (MCP_REMOTE_CAPABILITY_KEYS.includes(capability)
+            && current.remoteCapabilities[capability] !== true) {
+            throw new McpEnforcementError(
+                'MCP_REMOTE_CAPABILITY_NOT_ADVERTISED',
+                `Remote MCP did not advertise the ${capability} capability required for ${phase}`,
+            );
+        }
+        // MCP `_meta` is opaque client/transport metadata. Validate it inside the
+        // existing raw wire-size/shape bound, then erase it before classification,
+        // hashing, host dispatch, persistence, or remote forwarding.
+        const safeParams = stripOpaqueMcpMetadata(params, `${phase} params`);
+        let toolDescriptor = null;
+        if (phase === 'tools/call') {
+            const directory = current.remoteToolDirectory ?? createRemoteToolDirectory(session);
+            await directory.initialize();
+            if (enforcedSessionRecords.get(session) !== current || current.closed) {
+                throw new McpEnforcementError(
+                    'MCP_ENFORCED_SESSION_CLOSED',
+                    'The enforced MCP session closed before the host request could start',
+                );
+            }
+            const toolName = safeParams.name;
+            if (typeof toolName !== 'string' || toolName.length < 1) {
+                throw new TypeError('tools/call params.name is required');
+            }
+            const toolBinding = current.remoteToolDescriptors?.get(toolName);
+            if (!toolBinding) {
+                throw new McpEnforcementError(
+                    'MCP_REMOTE_TOOL_NOT_ADVERTISED',
+                    `Remote tool ${toolName} is not present in the bound discovery snapshot`,
+                );
+            }
+            toolDescriptor = toolBinding.descriptor;
+        }
+        const phaseRequest = buildEnforcementRequest({
+            schema: MCP_ENFORCEMENT_SCHEMAS.phaseRequest,
+            phase,
+            remoteUrl: current.remote_url,
+            params: safeParams,
+            toolName: phase === 'tools/call' ? safeParams.name ?? null : null,
+            toolDescriptor,
+            sessionBindingHash: current.session_binding_hash,
+        });
+        const invocation = startHostInvocation(
+            (requestDescriptor, context) => {
+                if (enforcedSessionRecords.get(session) !== current || current.closed) {
+                    throw new McpEnforcementError(
+                        'MCP_ENFORCED_SESSION_CLOSED',
+                        'The enforced MCP session closed before the host request could start',
+                    );
+                }
+                return current.hostRequest(requestDescriptor, context);
+            },
+            current.timeouts.request_ms,
+            phase,
+            phaseRequest,
+        );
+        current.activeRequests.add(invocation);
+        try {
+            const envelope = await invocation.promise;
+            const afterRequest = enforcedSessionRecords.get(session);
+            if (afterRequest !== current || current.closed) {
+                throw new McpEnforcementError(
+                    'MCP_ENFORCED_SESSION_CLOSED',
+                    'The enforced MCP session closed before the host result could be imported',
+                );
+            }
+            const result = verifyCleanImportedResult(envelope, phaseRequest);
+            if (phase === 'tools/list') {
+                const page = validateRemoteToolListPage(result);
+                assertRemoteToolPageMatchesSnapshot(current, page.bindings);
+                if (safeParams.cursor === undefined) current.remoteToolFirstPage = result;
+            }
+            return result;
+        } catch (error) {
+            try {
+                await close();
+            } catch {
+                // Preserve the request/import failure.
+            }
+            throw error;
+        } finally {
+            current.activeRequests.delete(invocation);
+        }
+    }
+
+    session = Object.freeze({
+        schema: MCP_ENFORCEMENT_SCHEMAS.session,
+        protocol_version: MCP_V2_PROTOCOL_VERSION,
+        stateless: true,
+        capabilities: remoteCapabilities,
+        remote_url: openRequest.mcp_server_ref,
+        remote_origin: openRequest.mcp_server_origin,
+        listTools: (params = {}) => request('tools/list', params),
+        callTool: (params = {}) => request('tools/call', params),
+        listResources: (params = {}) => request('resources/list', params),
+        readResource: (params = {}) => request('resources/read', params),
+        listPrompts: (params = {}) => request('prompts/list', params),
+        getPrompt: (params = {}) => request('prompts/get', params),
+        close,
+    });
+    enforcedSessionRecords.set(session, record);
+
+    try {
+        if (remoteCapabilities.tools) {
+            await session.listTools();
+            createRemoteToolDirectory(session);
+        }
+        return session;
+    } catch (error) {
+        try {
+            await close();
+        } catch {
+            // Preserve the first enforced-session failure.
+        }
+        throw error;
+    }
+}
+
+async function closeRemoteSession(remoteSession) {
+    if (!remoteSession) return;
+    if (!enforcedSessionRecords.has(remoteSession)) {
+        throw new TypeError('remoteSession must be an opaque enforced MCP session');
+    }
+    await remoteSession.close();
+}
+
+async function runMcpRelay({ enforcementBoundary } = {}) {
+    const { ProtocolError, ProtocolErrorCode, Server } = require('@modelcontextprotocol/server');
+    const { serveStdio, StdioServerTransport } = require('@modelcontextprotocol/server/stdio');
+    const activeRemoteSessions = new Set();
+    const ownedRemoteSessions = new Set();
+    const cleanupPromises = new WeakMap();
+    const pendingCleanupPromises = new Set();
+    const pendingServerBuilds = new Set();
+    let shutdownRequested = false;
+
+    function reportRelayError(error) {
+        const message = error instanceof Error ? error.stack || error.message : String(error);
+        console.error(`[agoragentic-mcp] stdio relay error: ${message}`);
+    }
+
+    function cleanupRemote(remoteSession) {
+        if (!remoteSession) return Promise.resolve();
+        const existing = cleanupPromises.get(remoteSession);
+        if (existing) return existing;
+        activeRemoteSessions.delete(remoteSession);
+        const cleanup = closeRemoteSession(remoteSession);
+        cleanupPromises.set(remoteSession, cleanup);
+        pendingCleanupPromises.add(cleanup);
+        void cleanup.finally(() => pendingCleanupPromises.delete(cleanup)).catch(() => {});
+        return cleanup;
+    }
+
+    function assertModernClientEnvelope(server, request, context) {
+        if (server.getNegotiatedProtocolVersion() !== MCP_V2_PROTOCOL_VERSION) return;
+        const metadata = context?.mcpReq?.envelope ?? request.params?._meta;
+        const validMetadata = metadata
+            && typeof metadata === 'object'
+            && !Array.isArray(metadata)
+            && metadata['io.modelcontextprotocol/protocolVersion'] === MCP_V2_PROTOCOL_VERSION
+            && metadata['io.modelcontextprotocol/clientCapabilities']
+            && typeof metadata['io.modelcontextprotocol/clientCapabilities'] === 'object'
+            && !Array.isArray(metadata['io.modelcontextprotocol/clientCapabilities']);
+        if (!validMetadata) {
+            throw new ProtocolError(
+                ProtocolErrorCode.InvalidParams,
+                `Every stateless ${MCP_V2_PROTOCOL_VERSION} request requires an exact _meta envelope`,
+            );
+        }
+    }
+
+    function modernEnvelopeGuard(server, handler) {
+        return async (request, context) => {
+            assertModernClientEnvelope(server, request, context);
+            return handler(request, context);
+        };
+    }
+
+    function relayShuttingDownError() {
+        return new McpEnforcementError(
+            'MCP_RELAY_SHUTTING_DOWN',
+            'The MCP stdio relay is shutting down and cannot create another server instance',
+        );
+    }
+
+    async function buildRelayServer() {
+        if (shutdownRequested) throw relayShuttingDownError();
+        let remoteSession = null;
+        try {
+            remoteSession = await connectRemoteClient({ enforcementBoundary });
+            ownedRemoteSessions.add(remoteSession);
+            activeRemoteSessions.add(remoteSession);
+        } catch (error) {
+            if (shutdownRequested) throw relayShuttingDownError();
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`[agoragentic-mcp] remote relay unavailable; exposing fail-closed local tool metadata only: ${message}`);
+        }
+        if (shutdownRequested) {
+            await cleanupRemote(remoteSession);
+            throw relayShuttingDownError();
+        }
+
+        try {
+            const server = new Server(
+                { name: 'agoragentic', version: PACKAGE_VERSION },
+                {
+                    capabilities: remoteSession
+                        ? localCapabilitiesForRemote(remoteSession.capabilities)
+                        : MCP_LOCAL_SERVER_CAPABILITIES,
+                },
+            );
+
+            server.onclose = () => {
+                void cleanupRemote(remoteSession).catch(reportRelayError);
+            };
+
+            if (remoteSession) {
+                if (remoteSession.capabilities.tools) {
+                    const remoteTools = createRemoteToolDirectory(remoteSession);
+                    server.setRequestHandler('tools/list', modernEnvelopeGuard(server, async (request) => remoteTools.list(request.params)));
+                    server.setRequestHandler('tools/call', modernEnvelopeGuard(server, async (request) => {
+                        if (FALLBACK_TOOL_NAMES.has(request.params.name) && !(await remoteTools.has(request.params.name))) {
+                            return executeFallbackTool(request.params.name, request.params.arguments || {}, {
+                                enforcementBoundary,
+                            });
+                        }
+                        return remoteSession.callTool(request.params);
+                    }));
+                }
+                if (remoteSession.capabilities.resources) {
+                    server.setRequestHandler('resources/list', modernEnvelopeGuard(server, async (request) => remoteSession.listResources(request.params)));
+                    server.setRequestHandler('resources/read', modernEnvelopeGuard(server, async (request) => remoteSession.readResource(request.params)));
+                }
+                if (remoteSession.capabilities.prompts) {
+                    server.setRequestHandler('prompts/list', modernEnvelopeGuard(server, async (request) => remoteSession.listPrompts(request.params)));
+                    server.setRequestHandler('prompts/get', modernEnvelopeGuard(server, async (request) => remoteSession.getPrompt(request.params)));
+                }
+                console.error(`[agoragentic-mcp] stdio relay ${PACKAGE_VERSION} connected to ${REMOTE_MCP_URL}`);
+            } else {
+                server.setRequestHandler('tools/list', modernEnvelopeGuard(server, async () => ({ tools: buildFallbackToolList() })));
+                server.setRequestHandler('tools/call', modernEnvelopeGuard(server, async (request) => executeFallbackTool(
+                    request.params.name,
+                    request.params.arguments || {},
+                    { enforcementBoundary },
+                )));
+                server.setRequestHandler('resources/list', modernEnvelopeGuard(server, async () => ({ resources: [] })));
+                server.setRequestHandler('resources/read', modernEnvelopeGuard(server, async () => {
+                    throw new Error('Resources are unavailable while the remote Agoragentic MCP relay is unreachable.');
+                }));
+                server.setRequestHandler('prompts/list', modernEnvelopeGuard(server, async () => ({ prompts: [] })));
+                server.setRequestHandler('prompts/get', modernEnvelopeGuard(server, async () => {
+                    throw new Error('Prompts are unavailable while the remote Agoragentic MCP relay is unreachable.');
+                }));
+                console.error(`[agoragentic-mcp] stdio adapter ${PACKAGE_VERSION} is fail-closed; desired fallback origin is ${AGORAGENTIC_BASE}`);
+            }
+            return server;
+        } catch (error) {
+            try {
+                await cleanupRemote(remoteSession);
+            } catch (cleanupError) {
+                throw new AggregateError(
+                    [error, cleanupError],
+                    'MCP relay server construction failed and remote cleanup also failed',
+                );
+            }
+            throw error;
+        }
+    }
+
+    function buildTrackedRelayServer() {
+        const build = buildRelayServer();
+        pendingServerBuilds.add(build);
+        void build.then(
+            () => pendingServerBuilds.delete(build),
+            () => pendingServerBuilds.delete(build),
+        );
+        return build;
+    }
+
+    let handle = null;
+    let shutdownPromise = null;
+    const shutdown = (reason) => {
+        if (shutdownPromise) return shutdownPromise;
+        shutdownRequested = true;
+        console.error(`[agoragentic-mcp] shutting down on ${reason}`);
+        shutdownPromise = (async () => {
+            let firstError = null;
+            if (handle) {
+                try {
+                    await handle.close();
+                } catch (error) {
+                    firstError ??= error;
+                }
+            }
+            while (pendingServerBuilds.size > 0) {
+                const buildResults = await Promise.allSettled([...pendingServerBuilds]);
+                const failedBuild = buildResults.find((result) => (
+                    result.status === 'rejected'
+                    && result.reason?.code !== 'MCP_RELAY_SHUTTING_DOWN'
+                ));
+                firstError ??= failedBuild?.reason ?? null;
+            }
+            const requestedCleanups = [...ownedRemoteSessions].map((session) => cleanupRemote(session));
+            const cleanupResults = await Promise.allSettled([
+                ...new Set([...requestedCleanups, ...pendingCleanupPromises]),
+            ]);
+            firstError ??= cleanupResults.find((result) => result.status === 'rejected')?.reason ?? null;
+            if (firstError) throw firstError;
+        })();
+        return shutdownPromise;
+    };
+
+    function terminateAfterShutdown(reason) {
+        void shutdown(reason).then(
+            () => process.exit(0),
+            (error) => {
+                const message = error instanceof Error ? error.stack || error.message : String(error);
+                console.error(`[agoragentic-mcp] shutdown failed: ${message}`);
+                process.exit(1);
+            },
+        );
+    }
+
+    process.once('SIGINT', () => terminateAfterShutdown('SIGINT'));
+    process.once('SIGTERM', () => terminateAfterShutdown('SIGTERM'));
+    process.stdin.once('end', () => terminateAfterShutdown('stdin EOF'));
+    process.stdin.once('close', () => terminateAfterShutdown('stdin close'));
+    if (process.stdin.readableEnded || process.stdin.destroyed) {
+        terminateAfterShutdown('closed stdin');
+    }
+
+    // Preserve the prior eager remote-enforcement setup and cleanup contract.
+    // Shutdown listeners are installed first so an initial host open cannot
+    // outlive SIGINT/SIGTERM. serveStdio may request a second instance only
+    // when a modern discovery probe deliberately falls back to a 2025-era
+    // initialize exchange; every such build is tracked through cleanup.
+    let firstServer;
+    try {
+        firstServer = await buildTrackedRelayServer();
+    } catch (error) {
+        if (shutdownRequested && error?.code === 'MCP_RELAY_SHUTTING_DOWN') {
+            await shutdownPromise;
+            return;
+        }
+        throw error;
+    }
+    if (shutdownRequested) {
+        await shutdownPromise;
+        return;
+    }
+
+    let firstServerAvailable = true;
+    const stdio = new StdioServerTransport(undefined, undefined, {
+        maxBufferSize: MAX_ENFORCEMENT_JSON_BYTES,
+    });
+    handle = serveStdio(async () => {
+        if (firstServerAvailable) {
+            firstServerAvailable = false;
+            return firstServer;
+        }
+        return buildTrackedRelayServer();
+    }, {
+        legacy: 'serve',
+        maxSubscriptions: 0,
+        transport: stdio,
+        onerror: reportRelayError,
+    });
+}
+
+function buildAcpInitializeResult() {
+    return {
+        protocolVersion: 1,
+        agentInfo: {
+            name: 'Agoragentic Agent OS',
+            version: PACKAGE_VERSION,
+            description:
+                'Fail-closed Agent OS protocol adapter. Network calls require a separately qualified embedding-host enforcement implementation.',
+            homepage: 'https://agoragentic.com',
+        },
+        agentCapabilities: {
+            tools: true,
+            streaming: false,
+            resources: false,
+            prompts: false,
+            loadSession: false,
+            promptCapabilities: {
+                image: false,
+            },
+        },
+        authMethods: [],
+    };
+}
+
+function buildAcpResponse(id, result) {
+    return {
+        jsonrpc: '2.0',
+        id,
+        result,
+    };
+}
+
+function buildAcpError(id, code, message, data) {
+    return {
+        jsonrpc: '2.0',
+        id,
+        error: data ? { code, message, data } : { code, message },
+    };
+}
+
+function writeAcpMessage(message) {
+    const serialized = `${JSON.stringify(message)}\n`;
+    return new Promise((resolve, reject) => {
+        process.stdout.write(serialized, (error) => {
+            if (error) reject(error);
+            else resolve();
+        });
+    });
+}
+
+function buildAcpSessionId() {
+    return `sess_${crypto.randomBytes(12).toString('hex')}`;
+}
+
+function extractAcpPromptText(content) {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return '';
+    return content
+        .map((part) => {
+            if (!part || typeof part !== 'object') return '';
+            if (part.type === 'text' && typeof part.text === 'string') return part.text;
+            return '';
+        })
+        .filter(Boolean)
+        .join('\n');
+}
+
+function buildAcpPromptReply(promptText) {
+    const suffix = promptText ? ` Prompt received: ${promptText.slice(0, 240)}` : '';
+    return [
+        'Agoragentic Agent Client Protocol adapter is a tool bridge, not a code-editing chat agent.',
+        'Use tools/list before tools/call. Network-backed tool calls remain blocked unless an embedding host supplies a separately qualified enforcement implementation.',
+        suffix,
+    ]
+        .filter(Boolean)
+        .join(' ');
+}
+
+async function runAcpAdapter({ enforcementBoundary } = {}) {
+    let remoteSession = null;
+    let remoteConnectionPromise = null;
+    let remoteShutdownPromise = null;
+    let shuttingDown = false;
+    const acpSessions = new Map();
+
+    async function getRemoteSession() {
+        if (shuttingDown) {
+            throw new McpEnforcementError(
+                'MCP_ACP_ADAPTER_SHUT_DOWN',
+                'The Agent Client Protocol adapter is shut down',
+            );
+        }
+        if (remoteSession) return remoteSession;
+        if (!remoteConnectionPromise) {
+            remoteConnectionPromise = connectRemoteClient({ enforcementBoundary });
+        }
+        let connected;
+        try {
+            connected = await remoteConnectionPromise;
+        } catch (error) {
+            remoteConnectionPromise = null;
+            throw error;
+        }
+        if (shuttingDown) {
+            await shutdownRemote();
+            throw new McpEnforcementError(
+                'MCP_ACP_ADAPTER_SHUT_DOWN',
+                'The Agent Client Protocol adapter shut down during remote discovery',
+            );
+        }
+        remoteSession = connected;
+        return remoteSession;
+    }
+
+    function shutdownRemote() {
+        if (remoteShutdownPromise) return remoteShutdownPromise;
+        remoteShutdownPromise = (async () => {
+            let session = remoteSession;
+            if (!session && remoteConnectionPromise) {
+                try {
+                    session = await remoteConnectionPromise;
+                } catch {
+                    return;
+                }
+            }
+            remoteSession = null;
+            if (session) await closeRemoteSession(session);
+        })();
+        return remoteShutdownPromise;
+    }
+
+    function beginShutdown() {
+        shuttingDown = true;
+        acpSessions.clear();
+        return shutdownRemote();
+    }
+
+    function terminateAfterShutdown() {
+        void beginShutdown().then(
+            () => process.exit(0),
+            (error) => {
+                const message = error instanceof Error ? error.stack || error.message : String(error);
+                console.error(`[agoragentic-mcp] ACP shutdown failed: ${message}`);
+                process.exit(1);
+            },
+        );
+    }
+
+    process.once('SIGINT', terminateAfterShutdown);
+    process.once('SIGTERM', terminateAfterShutdown);
+
+    console.error(`[agoragentic-mcp] Agent Client Protocol adapter ${PACKAGE_VERSION} ready; network calls require an embedding-host enforcement capability`);
+
+    for await (const lineRecord of readBoundedLines(
+        process.stdin,
+        MAX_ENFORCEMENT_JSON_BYTES,
+        'Agent Client Protocol JSON-RPC payload',
+    )) {
+        if (lineRecord.error) {
+            await writeAcpMessage(buildAcpError(
+                null,
+                -32600,
+                'Invalid or unsafe JSON-RPC payload',
+            ));
+            continue;
+        }
+        const line = lineRecord.text;
+        if (!line.trim()) continue;
+
+        let request;
+        try {
+            request = parseBoundedPlainJson(line, 'Agent Client Protocol JSON-RPC payload');
+        } catch (error) {
+            const code = error instanceof SyntaxError ? -32700 : -32600;
+            const message = code === -32700
+                ? 'Invalid JSON-RPC payload'
+                : 'Invalid or unsafe JSON-RPC payload';
+            await writeAcpMessage(buildAcpError(null, code, message));
+            continue;
+        }
+
+        const hasId = Object.prototype.hasOwnProperty.call(request, 'id');
+        const id = hasId ? request.id : null;
+
+        async function writeResponse(message) {
+            if (hasId) await writeAcpMessage(message);
+        }
+
+        if (request.jsonrpc !== '2.0' || typeof request.method !== 'string') {
+            await writeResponse(buildAcpError(id, -32600, 'Invalid JSON-RPC request'));
+            continue;
+        }
+        if (request.params !== undefined && request.params !== null) {
+            try {
+                assertPlainRecord(request.params, 'Agent Client Protocol JSON-RPC params');
+            } catch {
+                await writeResponse(buildAcpError(id, -32602, 'Agent Client Protocol params must be an object'));
+                continue;
+            }
+        }
+        if (shuttingDown) {
+            await writeResponse(buildAcpError(
+                id,
+                -32000,
+                'The Agent Client Protocol adapter is shut down',
+                { enforcement_code: 'MCP_ACP_ADAPTER_SHUT_DOWN' },
+            ));
+            continue;
+        }
+
+        try {
+            if (request.method === 'initialize') {
+                await writeResponse(buildAcpResponse(id, buildAcpInitializeResult()));
+            } else if (request.method === 'session/new') {
+                if (acpSessions.size >= MAX_ACP_SESSIONS) {
+                    await writeResponse(buildAcpError(id, -32000, 'Agent Client Protocol session limit reached'));
+                    continue;
+                }
+                const requestedCwd = request.params?.cwd;
+                if (requestedCwd !== undefined && (
+                    typeof requestedCwd !== 'string'
+                    || requestedCwd.length === 0
+                    || requestedCwd.length > MAX_ACP_CWD_LENGTH
+                    || requestedCwd.includes('\0')
+                )) {
+                    await writeResponse(buildAcpError(
+                        id,
+                        -32602,
+                        `Agent Client Protocol cwd must be a nonempty string of at most ${MAX_ACP_CWD_LENGTH} characters`,
+                    ));
+                    continue;
+                }
+                const sessionId = buildAcpSessionId();
+                acpSessions.set(sessionId, {
+                    cwd: requestedCwd ?? process.cwd(),
+                    createdAt: new Date().toISOString(),
+                    cancelled: false,
+                });
+                await writeResponse(buildAcpResponse(id, { sessionId }));
+            } else if (request.method === 'session/prompt') {
+                const sessionId = request.params?.sessionId;
+                if (!sessionId || !acpSessions.has(sessionId)) {
+                    await writeResponse(buildAcpError(id, -32602, 'Unknown or missing Agent Client Protocol sessionId'));
+                    continue;
+                }
+
+                const session = acpSessions.get(sessionId);
+                session.cancelled = false;
+                const promptText = extractAcpPromptText(request.params?.content);
+                const reply = buildAcpPromptReply(promptText);
+
+                await writeAcpMessage({
+                    jsonrpc: '2.0',
+                    method: 'session/update',
+                    params: {
+                        sessionId,
+                        update: {
+                            sessionUpdate: 'agent_message_chunk',
+                            content: {
+                                type: 'text',
+                                text: reply,
+                            },
+                        },
+                    },
+                });
+                await writeResponse(buildAcpResponse(id, { stopReason: session.cancelled ? 'cancelled' : 'end_turn' }));
+            } else if (request.method === 'session/cancel') {
+                const sessionId = request.params?.sessionId;
+                if (sessionId && acpSessions.has(sessionId)) {
+                    acpSessions.get(sessionId).cancelled = true;
+                }
+                await writeResponse(buildAcpResponse(id, { ok: true }));
+            } else if (request.method === 'tools/list') {
+                await writeResponse(buildAcpResponse(id, { tools: ACP_TOOLS }));
+            } else if (request.method === 'tools/call') {
+                const toolName = request.params?.name;
+                if (!ACP_TOOL_NAMES.has(toolName)) {
+                    await writeResponse(buildAcpError(id, -32602, 'Tool is not advertised by this Agent Client Protocol adapter'));
+                    continue;
+                }
+                const session = await getRemoteSession();
+                const result = await session.callTool(request.params || {});
+                await writeResponse(buildAcpResponse(id, result));
+            } else if (request.method === 'shutdown') {
+                await beginShutdown();
+                await writeResponse(buildAcpResponse(id, { ok: true }));
+            } else {
+                await writeResponse(
+                    buildAcpError(id, -32601, 'Unsupported Agent Client Protocol method', {
+                        supported_methods: [
+                            'initialize',
+                            'session/new',
+                            'session/prompt',
+                            'session/cancel',
+                            'tools/list',
+                            'tools/call',
+                            'shutdown',
+                        ],
+                    })
+                );
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const data = error instanceof McpEnforcementError
+                ? { enforcement_code: error.code }
+                : undefined;
+            await writeResponse(buildAcpError(id, -32000, message, data));
+        }
+    }
+
+    await beginShutdown();
+}
+
+const entrypoint = ACP_MODE ? runAcpAdapter : runMcpRelay;
+
+if (require.main === module) {
+    entrypoint().catch((error) => {
+        const message = error instanceof Error ? error.stack || error.message : String(error);
+        console.error(`[agoragentic-mcp] fatal: ${message}`);
+        process.exit(1);
+    });
+}
+
+module.exports = Object.freeze({
+    MCP_ENFORCEMENT_SCHEMAS,
+    MCP_LOCAL_SERVER_CAPABILITIES,
+    MCP_V2_PROTOCOL_VERSION,
+    buildFallbackToolList,
+    closeRemoteSession,
+    computeMcpCleanImportEvidenceHash,
+    connectRemoteClient,
+    createMcpEnforcementBoundary,
+    createRemoteToolDirectory,
+    executeFallbackTool,
+    isMcpEnforcementBoundary,
+    runAcpAdapter,
+    runMcpRelay,
+    stripOpaqueMcpMetadata,
+});

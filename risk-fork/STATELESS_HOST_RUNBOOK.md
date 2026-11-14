@@ -180,7 +180,7 @@ The managed local host additionally supports an encrypted claim/resource deliver
 journal, purpose-specific worker routes, trusted per-request OAuth verification
 seam, bounded separate loopback ingress, and a scheduled control-plane reaper.
 See [worker contract](./managed-service/WORKER.md) and
-[managed source README](./managed-service/README.md) for explicit construction and
+[managed source README](https://github.com/Agoragentic/agoragentic-integrations/blob/7063285e253f92ba18f71470878cef5653a82743/risk-fork/managed-service/README.md) for explicit construction and
 restart limits. Delivery replay never replays a provider effect or recreates a
 prepared object, and reaping never asserts cloud resource deletion.
 

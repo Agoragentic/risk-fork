@@ -1,5 +1,7 @@
 # Agoragentic Risk Fork
 
+Standalone export note: this core candidate is derived from unmerged upstream commit `7063285e253f92ba18f71470878cef5653a82743`. Historical status below describes the upstream project; it does not establish that this export is published or merged. The managed runtime, hosted MCP package and visual demo are not included. Start with [GETTING_STARTED.md](./GETTING_STARTED.md) for runnable standalone commands.
+
 ![Risk Fork — run untrusted MCP and tool calls in a disposable environment while the trusted parent retains identity, memory, and authority.](./assets/risk-fork-social-preview.svg)
 
 Risk Fork is an experimental, source-only package for **fork-before-risk** agent execution. It defines provider-neutral contracts for classifying a proposed interaction, capturing a reference-only Savepoint Capsule, executing in a tainted child, validating a narrowly typed result, destroying the child, and—only from a clean controller—committing an accepted artifact.
