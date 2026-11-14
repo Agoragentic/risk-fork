@@ -9,6 +9,16 @@ const mode = process.env.RISK_FORK_TEST_REVIEW_FAILURE;
 const originalOpen = fs.open;
 const originalUnlink = fs.unlink;
 const originalWriteFile = fs.writeFile;
+const originalLstat = fs.lstat;
+if (mode === 'directory-entry-count') {
+  fs.lstat = async function (...args) {
+    const details = await originalLstat.apply(this, args);
+    if (args[0] === output && details.isDirectory()) {
+      details.nlink += BigInt((await fs.readdir(output)).length);
+    }
+    return details;
+  };
+}
 fs.open = async function (...args) {
   const handle = await originalOpen.apply(this, args);
   if (args[0] !== path.join(output, filename) || args[1] !== 'wx') return handle;

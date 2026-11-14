@@ -244,10 +244,12 @@ async function writeReview(packet, output) {
   let directoryIdentity;
   function sameIdentity(left, right) {
     return left.dev === right.dev && left.ino === right.ino
-      && left.mode === right.mode && left.nlink === right.nlink;
+      && left.mode === right.mode && left.uid === right.uid && left.gid === right.gid;
   }
   async function directoryOwned() {
     const current = await lstat(output, { bigint: true });
+    // Directory link counts can track file entries (for example on APFS),
+    // so they legitimately change as this operation writes/removes files.
     return directoryIdentity !== undefined && current.isDirectory()
       && !current.isSymbolicLink() && sameIdentity(current, directoryIdentity);
   }
@@ -287,7 +289,7 @@ async function writeReview(packet, output) {
         && bytes.subarray(0, offset).equals(entry.bytes.subarray(0, offset))
         && current.isFile() && !current.isSymbolicLink()
         && [after, current].every((details) => sameIdentity(before, details)
-          && before.size === details.size && before.mtimeNs === details.mtimeNs
+          && before.nlink === details.nlink && before.size === details.size && before.mtimeNs === details.mtimeNs
           && before.ctimeNs === details.ctimeNs);
     } finally {
       await handle.close();

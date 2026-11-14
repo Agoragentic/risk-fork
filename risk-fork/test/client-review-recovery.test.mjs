@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
 const cli = path.join(packageRoot, 'scripts/client-adoption.mjs');
-const injector = fileURLToPath(new URL('./fixtures/client-review-write-failure.mjs', import.meta.url));
+const injector = new URL('./fixtures/client-review-write-failure.mjs', import.meta.url).href;
 
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'risk-fork-review-recovery-'));
@@ -91,6 +91,16 @@ for (const mode of ['unexpected', 'replaced', 'changed', 'cleanup-failure']) {
     assert.equal(f.verify().status, 64, 'incomplete output must never verify');
   });
 }
+
+test('review rollback permits directory link counts that track created file entries', async (t) => {
+  const f = await fixture(t);
+  const failed = f.write({ filename: 'manifest.json', mode: 'directory-entry-count' });
+  assert.equal(failed.status, 64, failed.stderr);
+  assert.equal(JSON.parse(failed.stderr).review_cleanup_status, 'removed');
+  await assert.rejects(lstat(f.output), { code: 'ENOENT' });
+  assert.equal(f.write().status, 0);
+  assert.equal(f.verify().status, 0);
+});
 
 test('review writer leaves a pre-existing output directory untouched', async (t) => {
   const f = await fixture(t);
