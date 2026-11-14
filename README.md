@@ -2,7 +2,7 @@
 
 Risk Fork provides deterministic contracts and host controls for agents that need to inspect an operation before allowing consequential effects. It keeps classification, authority, evidence and execution outcomes separate. Model judgments cannot grant permission.
 
-This standalone core source export targets [`Agoragentic/risk-fork`](https://github.com/Agoragentic/risk-fork) and was prepared from public upstream commit [`7063285e253f92ba18f71470878cef5653a82743`](https://github.com/Agoragentic/agoragentic-integrations/commit/7063285e253f92ba18f71470878cef5653a82743). That commit contains unmerged upstream PR work. Source availability does not establish a package release, installation into an owner's environment, or production qualification. The existing [integrations source](https://github.com/Agoragentic/agoragentic-integrations/tree/main/risk-fork) remains the compatibility source while consumer lineage and migration gates are open.
+This standalone repository builds on an initial public upstream export at [`7063285e253f92ba18f71470878cef5653a82743`](https://github.com/Agoragentic/agoragentic-integrations/commit/7063285e253f92ba18f71470878cef5653a82743). Additional public source was imported from [`46df11085c9144540940b2ea0df096dbf0c2986c`](https://github.com/Agoragentic/agoragentic-integrations/commit/46df11085c9144540940b2ea0df096dbf0c2986c). Source availability does not establish a package release, installation into an owner's environment, or production qualification. The existing [integrations source](https://github.com/Agoragentic/agoragentic-integrations/tree/main/risk-fork) remains the compatibility source while consumer lineage and migration gates are open.
 
 ## Try the local reference
 
@@ -26,19 +26,32 @@ Keep the temporary state directory while inspecting the local output, then remov
 
 The reference adapter demonstrates host-controlled allow, approval-required and deny behavior. It is not evidence of production isolation. See [the core guide](risk-fork/GETTING_STARTED.md), [security model](risk-fork/SECURITY_MODEL.md), and [framework adapters](risk-fork/FRAMEWORK_ADAPTERS.md).
 
+## Try the offline demo
+
+After the locked source-checkout install above, on a supported POSIX host run:
+
+```sh
+node risk-fork/hackathon/bin/risk-fork-demo.mjs doctor
+node risk-fork/hackathon/bin/risk-fork-demo.mjs run --scenario e2b-malicious-mcp-containment
+```
+
+This uses a fake E2B SDK and synthetic fixtures; it is not a real cloud sandbox or live traffic protection. See the [demo guide](risk-fork/hackathon/README.md) for the recorder, cleanup and platform restrictions. A separately built and verified offline kit needs no install. A standalone candidate must be built from an exact clean commit and independently verified before distribution; its internal hashes alone do not authenticate its origin.
+
 ## What is included
 
 - Core contracts, classifier, controller, taint and clean-commit boundaries, receipts, framework adapters and PostgreSQL authority adapters.
 - Schemas, migrations, local examples and offline/package tests, plus separately installed provider-free SDK qualification.
-- Public operational documentation and SQL templates. Their presence does not mean a managed service is included or deployed.
+- Public managed-service source, operational documentation, SQL templates, dynamic examples and the offline hackathon demo. These are source inputs, not evidence of deployment or a qualified service.
 
-The managed-service runtime, hosted MCP package, demo application and private host wiring remain in their owning locations. No provider credentials or live activation are supplied. A small shared canonicalization module remains at its upstream path so template inputs keep their source identity.
+The hosted MCP package, production gateway and private host wiring remain in their owning locations. No provider credentials or live activation are supplied. A small shared canonicalization module remains at its upstream path so template inputs keep their source identity.
 
 ## Host integration is explicit
 
 The standalone package does not include the production MCP gateway. The client-adoption CLI's inherited default points to the integrations sibling `mcp/risk-forkd.js`; that path is absent here and fails closed. Supply a separately reviewed gateway with `--gateway <absolute-path>` and `--gateway-sha256 <exact-sha256>` when planning a host integration. Test fixtures are for tests, not installation targets. See [client adoption](risk-fork/CLIENT_ADOPTION.md).
 
 The hosted builder still binds repository-relative source hashes in the integrations repository. This export does not switch that consumer to a new URL or package. [Pinned external consumer tests](risk-fork/test/integration/README.md) remain separate from the core suite and fail when their required inputs are missing.
+
+The imported Runtime Dynamic example contains a guarded owner-operated live route whose approval and CI bindings still refer to the integrations repository. It is not part of the offline demo; do not run that route from this standalone export. Any separate live qualification must follow the reviewed upstream route and its own authorization.
 
 ## Status, provenance and license
 

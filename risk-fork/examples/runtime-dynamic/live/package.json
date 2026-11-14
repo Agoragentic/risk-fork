@@ -1,0 +1,28 @@
+{
+  "name": "agoragentic-runtime-dynamic-live-demo",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Owner-operated Base Sepolia demo only; not a published signer",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test ../../../test/runtime-dynamic-live/*.test.mjs"
+  },
+  "dependencies": {
+    "@dynamic-labs-wallet/node-evm": "0.0.225",
+    "@walletconnect/utils": "2.21.10",
+    "viem": "2.38.2"
+  },
+  "overrides": {
+    "@walletconnect/utils": "$@walletconnect/utils",
+    "axios@^1.0.0": "1.20.0",
+    "ws@^8.0.0": "8.21.3",
+    "decode-uri-component@^0.2.2": "0.5.0",
+    "uuid@^11.0.0": "11.1.1",
+    "bn.js@^4.0.0": "4.12.3",
+    "follow-redirects": "1.16.2",
+    "zod": "4.6.6"
+  }
+}
