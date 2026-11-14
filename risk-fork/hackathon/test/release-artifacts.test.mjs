@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 import { createDeterministicZip } from '../src/offline-kit.mjs';
 import {
@@ -16,6 +19,78 @@ import {
 } from '../scripts/release-artifacts.mjs';
 
 const SOURCE_COMMIT = 'a'.repeat(40);
+const execFileAsync = promisify(execFile);
+
+async function makeVerifierFixture(root) {
+  const artifactDirectory = path.join(root, SOURCE_COMMIT.slice(0, 12));
+  const kitDirectory = path.join(root, 'release-source-kit');
+  await mkdir(artifactDirectory, { recursive: true });
+  const dependencyRoot = path.join(kitDirectory, 'risk-fork/node_modules/example-dependency');
+  await mkdir(dependencyRoot, { recursive: true });
+  await writeFile(path.join(kitDirectory, 'risk-fork/package.json'), JSON.stringify({
+    name: '@agoragentic/risk-fork', version: '0.1.0-alpha.1', license: 'Apache-2.0',
+  }));
+  await writeFile(path.join(dependencyRoot, 'package.json'), JSON.stringify({
+    name: 'example-dependency', version: '1.2.3', license: 'MIT',
+  }));
+  await writeFile(path.join(kitDirectory, 'DEPENDENCY_PROVENANCE.json'), JSON.stringify({
+    schema: 'agoragentic.risk-fork.offline-dependency-provenance.v1',
+    materialization: 'npm_ci_offline_from_lock_cache', network_used: false,
+    install_scripts_executed: false,
+    packages: [{ name: 'example-dependency', version: '1.2.3',
+      resolved: 'https://registry.npmjs.org/example-dependency/-/example-dependency-1.2.3.tgz',
+      integrity: `sha512-${Buffer.alloc(64, 7).toString('base64')}`, tree_sha256: 'b'.repeat(64) }],
+  }));
+  const payloadDirectory = path.join(root, 'payload');
+  await mkdir(payloadDirectory);
+  const internalManifest = Buffer.from('{}\n', 'utf8');
+  await writeFile(path.join(payloadDirectory, 'MANIFEST.json'), internalManifest);
+  const payload = Buffer.from('offline payload\n', 'utf8');
+  await writeFile(path.join(payloadDirectory, 'README.md'), payload);
+  const zipPath = path.join(artifactDirectory, `risk-fork-hackathon-demo-${SOURCE_COMMIT.slice(0, 12)}.zip`);
+  const zip = await createDeterministicZip({ sourceDirectory: payloadDirectory, outputPath: zipPath });
+  const build = { source_commit: SOURCE_COMMIT, artifact_container: artifactDirectory, kit_directory: kitDirectory,
+    zip_path: zipPath, zip_sha256: zip.sha256, zip_bytes: zip.bytes,
+    manifest_sha256: createHash('sha256').update(internalManifest).digest('hex'), manifest_bytes: internalManifest.length,
+    file_count: 1, payload_bytes: payload.length };
+  await writeReleaseSidecars({ build });
+  return artifactDirectory;
+}
+
+async function runVerifier(artifactDirectory, expected) {
+  const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../scripts/verify-release-artifacts.mjs');
+  const extraction = path.join(artifactDirectory, 'extract');
+  try {
+    await execFileAsync(process.execPath, [script, '--artifacts', artifactDirectory, '--extract-to', extraction], {
+      env: { ...process.env, ...(expected === null ? { RISK_FORK_RELEASE_SOURCE_SHA: undefined } : { RISK_FORK_RELEASE_SOURCE_SHA: expected }) },
+      windowsHide: true, maxBuffer: 2 * 1024 * 1024,
+    });
+    return { ok: true, stderr: '', extraction };
+  } catch (error) {
+    return { ok: false, stderr: `${error.stderr ?? ''}${error.stdout ?? ''}`, extraction };
+  }
+}
+
+test('release verifier honors an optional exact source SHA trust anchor', async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'risk-fork-release-cli-'));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const artifacts = await makeVerifierFixture(temporary);
+  assert.equal((await verifyReleaseArtifactSet({ artifactDirectory: artifacts })).verified, true);
+  const invalid = await runVerifier(artifacts, 'A'.repeat(40));
+  assert.match(invalid.stderr, /exact lowercase 40-character Git SHA/);
+  await assert.rejects(readFile(invalid.extraction), { code: 'ENOENT' });
+  const mismatch = await runVerifier(artifacts, 'b'.repeat(40));
+  assert.match(mismatch.stderr, /does not match RISK_FORK_RELEASE_SOURCE_SHA/);
+  await assert.rejects(readFile(mismatch.extraction), { code: 'ENOENT' });
+  const correct = await runVerifier(artifacts, SOURCE_COMMIT);
+  assert.equal(correct.ok, false, 'the deliberately incomplete fixture must fail after the trust-anchor stage');
+  assert.match(correct.stderr, /Offline-kit manifest schema is unsupported/);
+  await assert.rejects(readFile(correct.extraction), { code: 'ENOENT' });
+  const unset = await runVerifier(artifacts, null);
+  assert.equal(unset.ok, false, 'the deliberately incomplete fixture must fail after structural verification');
+  assert.match(unset.stderr, /Offline-kit manifest schema is unsupported/);
+  await assert.rejects(readFile(unset.extraction), { code: 'ENOENT' });
+});
 
 test('release envelope binds ZIP, checksum, SPDX SBOM, and exact source commit', async (t) => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'risk-fork-release-artifacts-'));

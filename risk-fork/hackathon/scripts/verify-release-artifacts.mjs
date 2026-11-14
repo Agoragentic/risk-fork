@@ -34,7 +34,16 @@ if (recordPath && !path.isAbsolute(recordPath)) {
   throw new Error('--record must be an explicit absolute filename');
 }
 
+const expectedSourceSha = process.env.RISK_FORK_RELEASE_SOURCE_SHA;
+if (expectedSourceSha !== undefined
+  && !/^[0-9a-f]{40}$/.test(expectedSourceSha)) {
+  throw new Error('RISK_FORK_RELEASE_SOURCE_SHA must be an exact lowercase 40-character Git SHA');
+}
+
 const artifact = await verifyReleaseArtifactSet({ artifactDirectory });
+if (expectedSourceSha !== undefined && artifact.source_commit !== expectedSourceSha) {
+  throw new Error('Release source commit does not match RISK_FORK_RELEASE_SOURCE_SHA');
+}
 await mkdir(path.dirname(extractionDirectory), { recursive: true });
 const extraction = await extractAndVerifyOfflineKit({
   zipPath: artifact.zip_path,
