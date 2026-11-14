@@ -1,6 +1,6 @@
 # Agoragentic Risk Fork
 
-Standalone export note: this core candidate is derived from unmerged upstream commit `7063285e253f92ba18f71470878cef5653a82743`. Historical status below describes the upstream project; it does not establish that this export is published or merged. The managed runtime, hosted MCP package and visual demo are not included. Start with [GETTING_STARTED.md](./GETTING_STARTED.md) for runnable standalone commands.
+Standalone export note: this core source is derived from unmerged upstream commit `7063285e253f92ba18f71470878cef5653a82743`. Historical status below describes the upstream project; this export does not establish that the upstream PRs merged or that an npm package was published. The managed runtime, hosted MCP package and visual demo are not included. Start with [GETTING_STARTED.md](./GETTING_STARTED.md) for runnable standalone commands.
 
 ![Risk Fork — run untrusted MCP and tool calls in a disposable environment while the trusted parent retains identity, memory, and authority.](./assets/risk-fork-social-preview.svg)
 
@@ -184,9 +184,11 @@ and a separate-owner least-privilege role. These are source/local-test capabilit
 not a deployed service, E2B qualification, or live traffic protection. Follow the
 runbooks for key custody, explicit migrations, restart limits, and remaining gates.
 
-A standalone Apache-2.0 repository is proposed in the
-[repository split plan](./REPOSITORY_SPLIT_PLAN.md). No repository relocation,
-package publication, or deployment is established by that plan.
+The standalone Apache-2.0 core source target is
+[Agoragentic/risk-fork](https://github.com/Agoragentic/risk-fork). The
+[historical split plan and remaining migration gates](./REPOSITORY_SPLIT_PLAN.md)
+preserve the integrations mirror until consumer lineage is qualified. Source
+availability does not establish package publication or deployment.
 
 ### Framework-neutral host onboarding
 

@@ -1,10 +1,11 @@
-# Proposed standalone Risk Fork repository
+# Historical repository split plan and remaining migration gates
 
-Recommendation: give Risk Fork its own public Apache-2.0 repository, with
-`rhein1/risk-fork` as a proposed name. This is a migration plan, not confirmation
-that the repository exists. Creating, publishing, or transferring a repository
-is a separate owner decision. Keep `@agoragentic/risk-fork` and the author/NOTICE
-attribution stable. Open source availability is not production activation.
+The owner selected `Agoragentic/risk-fork` for the dedicated public Apache-2.0
+core source repository. The historical plan below guided the reviewed export;
+creating a repository does not complete consumer migration or qualify a host.
+Keep `@agoragentic/risk-fork`, the author/NOTICE attribution and the integrations
+compatibility mirror stable until exact source lineage is verified. Open source
+availability is not production activation.
 
 ## Public boundary
 

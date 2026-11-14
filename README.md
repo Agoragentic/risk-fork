@@ -2,7 +2,7 @@
 
 Risk Fork provides deterministic contracts and host controls for agents that need to inspect an operation before allowing consequential effects. It keeps classification, authority, evidence and execution outcomes separate. Model judgments cannot grant permission.
 
-This is a standalone core repository candidate for `Agoragentic/risk-fork`, prepared from public upstream commit [`7063285e253f92ba18f71470878cef5653a82743`](https://github.com/Agoragentic/agoragentic-integrations/commit/7063285e253f92ba18f71470878cef5653a82743). That commit contains unmerged PR work. This candidate has not been published, released, installed into an owner's environment, or qualified for production. The existing [integrations source](https://github.com/Agoragentic/agoragentic-integrations/tree/main/risk-fork) remains the compatibility source while consumer lineage and migration gates are open.
+This standalone core source export targets [`Agoragentic/risk-fork`](https://github.com/Agoragentic/risk-fork) and was prepared from public upstream commit [`7063285e253f92ba18f71470878cef5653a82743`](https://github.com/Agoragentic/agoragentic-integrations/commit/7063285e253f92ba18f71470878cef5653a82743). That commit contains unmerged upstream PR work. Source availability does not establish a package release, installation into an owner's environment, or production qualification. The existing [integrations source](https://github.com/Agoragentic/agoragentic-integrations/tree/main/risk-fork) remains the compatibility source while consumer lineage and migration gates are open.
 
 ## Try the local reference
 

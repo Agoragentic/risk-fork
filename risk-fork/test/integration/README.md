@@ -4,4 +4,4 @@ The standalone core test suite excludes demo and hosted code. To run the demo-on
 
 To run the hosted-consumer regression, provide the absolute `RISK_FORK_HOSTED_BUNDLE` artifact from the same commit and run `npm run test:integration:hosted`. The test verifies the exact artifact SHA-256 before import. Hosted source and bundles are not included in this candidate. These explicit commands fail if their inputs are unavailable; neither test is counted as a standalone core test. No provider call is needed.
 
-The `Agoragentic/risk-fork` repository URLs in package metadata are proposed for this private candidate; they do not establish publication or a package release.
+The repository URLs in package metadata target `Agoragentic/risk-fork`. Source availability does not establish an npm package release or replace the exact upstream consumer bindings above.
