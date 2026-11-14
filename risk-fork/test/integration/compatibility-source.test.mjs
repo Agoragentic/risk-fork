@@ -15,7 +15,9 @@ const revision = '7063285e253f92ba18f71470878cef5653a82743';
 const manifestPath = 'risk-fork-hosted-mcp/integrity-manifest.json';
 const manifestDigest = 'b77928f598b718c5281d15adbd5a31bc09e0285a5b3d2ddb8b31c967fcffe863';
 const gatewayDigest = 'sha256:7add1f82a164693fec07b9aecb97c25a5505ac0ff516d47d8603a975126f4de8';
-const standalonePackageDigest = 'cf988202d66f0db15fb4997a2adac7735db46fb248a326bd3b81b9088d46c67c';
+// Reviewed migration changes only the package file allowlist: imported demo,
+// managed runtime, dynamic examples and observer labs remain checkout-only.
+const standalonePackageDigest = '2454becf2b712f8afeb17b578d1460f291850c82a5720d050eba6ad85a782518';
 const standaloneLockDigest = '529c03f0bf955766969cdc13be256fbb3988e257c9e70ef515aa9c9d71726e21';
 const recursiveRoots = ['risk-fork/src', 'risk-fork/e2b-template', 'risk-fork/ops/postgres', 'transaction-assurance/src'];
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -149,6 +151,20 @@ test('a lock-only dependency change requires renewed compatibility review', asyn
   lock.packages['node_modules/pg'].version = '8.16.3';
   await writeFile(target, `${JSON.stringify(lock, null, 2)}\n`);
   await assert.rejects(verifyStandalonePackage(root), /standalone lock change/);
+});
+
+test('a package file-allowlist change requires renewed compatibility review', async (t) => {
+  const root = await temporary(t);
+  await mkdir(path.join(root, 'risk-fork'));
+  for (const name of ['package.json', 'package-lock.json']) {
+    await copyFile(path.join(standalone, 'risk-fork', name), path.join(root, 'risk-fork', name));
+  }
+  await verifyStandalonePackage(root);
+  const target = path.join(root, 'risk-fork/package.json');
+  const pkg = JSON.parse(await readFile(target, 'utf8'));
+  pkg.files.push('managed-service/src/');
+  await writeFile(target, `${JSON.stringify(pkg, null, 2)}\n`);
+  await assert.rejects(verifyStandalonePackage(root), /standalone package change/);
 });
 
 test('shared-source proof rejects altered, missing, extra and redirected runtime files', async (t) => {
