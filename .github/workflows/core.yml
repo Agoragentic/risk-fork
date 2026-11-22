@@ -273,7 +273,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Agoragentic/agoragentic-integrations
-          ref: 7063285e253f92ba18f71470878cef5653a82743
+          ref: 74e186539222c3e6ee84590e067c8784fcbddd94
           path: .upstream
           persist-credentials: false
       - name: Install only locked upstream core test dependencies

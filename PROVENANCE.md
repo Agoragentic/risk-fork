@@ -17,3 +17,14 @@ Every exported historical blob and commit object was scanned locally with offici
 The subsequent staged public-source import was also scanned with Gitleaks 8.30.1. It returned 13 generic-key matches: 11 literal idempotency keys in test requests and two intentionally credential-shaped values in a security-scanner fixture. An independent review classified these as synthetic test inputs; the matched files are byte-identical to the pinned public upstream blobs. These findings remain disclosed rather than described as a zero-finding scan. Scanning does not establish that no other secret exists.
 
 The existing integrations mirror remains unchanged. The hosted builder's repository-relative source hashes, copied assets, ARD discovery pointers and MCP consumers must continue to resolve there until exact-commit or package/digest lineage is qualified. No deployment, package release or live provider action is part of this export.
+
+## E2B 2.64.0 compatibility-source alignment
+
+The current E2B migration adopts the shared public runtime and historical v2
+verification exports already reviewed in Integrations PR #571 and merged at
+`74e186539222c3e6ee84590e067c8784fcbddd94`. Initial export and import revisions
+above remain historical lineage anchors. Existing exact-byte consumer tests now
+qualify 54 shared files against that immutable owning source and its existing
+hosted integrity manifest/bundle. Historical v1/v2 schema bytes are retained.
+This follows the existing integrations consumer; it does not switch any hosted
+consumer to this standalone repository, publish a package or qualify a runtime.

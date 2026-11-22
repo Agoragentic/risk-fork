@@ -8,8 +8,8 @@ import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 
 const bundle = process.env.RISK_FORK_HOSTED_BUNDLE;
-if (!bundle || !path.isAbsolute(bundle)) throw new Error('Set RISK_FORK_HOSTED_BUNDLE to the exact artifact from upstream commit 7063285e253f92ba18f71470878cef5653a82743');
-assert.equal(createHash('sha256').update(await readFile(bundle)).digest('hex'), 'bc94b1150b653dd32059fb6652d72d3be1b3d8112f5118fa82f93286e878ae57', 'upstream artifact pin');
+if (!bundle || !path.isAbsolute(bundle)) throw new Error('Set RISK_FORK_HOSTED_BUNDLE to the exact artifact from upstream commit 74e186539222c3e6ee84590e067c8784fcbddd94');
+assert.equal(createHash('sha256').update(await readFile(bundle)).digest('hex'), '076fc71e98e9357f535e3adb261c68a41811256c8564c67209f88a2bd71226ae', 'upstream artifact pin');
 const hosted = await import(pathToFileURL(bundle).href);
 test('hosted bundle rejects unbound ancestor optional before evaluation', async (t) => {
   const root = await mkdtemp(path.join(await realpath(os.tmpdir()), 'risk-fork-hosted-consumer-'));
@@ -21,7 +21,7 @@ test('hosted bundle rejects unbound ancestor optional before evaluation', async 
   const outer = path.join(root, 'node_modules', name);
   await mkdir(path.join(sdk, 'dist'), { recursive: true });
   await mkdir(outer, { recursive: true });
-  await writeFile(path.join(sdk, 'package.json'), JSON.stringify({ name: 'e2b', version: '2.63.0', main: 'dist/index.js', optionalDependencies: { [name]: '1.0.0' } }));
+  await writeFile(path.join(sdk, 'package.json'), JSON.stringify({ name: 'e2b', version: '2.64.0', main: 'dist/index.js', optionalDependencies: { [name]: '1.0.0' } }));
   await writeFile(path.join(sdk, 'dist/index.js'), `module.exports = require(${JSON.stringify(name)});\n`);
   await writeFile(path.join(outer, 'package.json'), JSON.stringify({ name, version: '1.0.0', main: 'index.js' }));
   await writeFile(path.join(outer, 'index.js'), `globalThis[Symbol.for(${JSON.stringify(path.basename(root))})] = true; module.exports = {};\n`);

@@ -11,14 +11,14 @@ import { fileURLToPath } from 'node:url';
 
 const standalone = fileURLToPath(new URL('../../../', import.meta.url));
 const checkout = process.env.RISK_FORK_UPSTREAM_CHECKOUT;
-const revision = '7063285e253f92ba18f71470878cef5653a82743';
+const revision = '74e186539222c3e6ee84590e067c8784fcbddd94';
 const manifestPath = 'risk-fork-hosted-mcp/integrity-manifest.json';
-const manifestDigest = 'b77928f598b718c5281d15adbd5a31bc09e0285a5b3d2ddb8b31c967fcffe863';
+const manifestDigest = '644386e95878db45b03ff9e010b3f284ed350c9c647673f32b4fcea855a1835e';
 const gatewayDigest = 'sha256:7add1f82a164693fec07b9aecb97c25a5505ac0ff516d47d8603a975126f4de8';
-// Reviewed migration changes only the package file allowlist: imported demo,
-// managed runtime, dynamic examples and observer labs remain checkout-only.
-const standalonePackageDigest = '2454becf2b712f8afeb17b578d1460f291850c82a5720d050eba6ad85a782518';
-const standaloneLockDigest = '529c03f0bf955766969cdc13be256fbb3988e257c9e70ef515aa9c9d71726e21';
+// Reviewed 2.64.0 migration retains the package file allowlist and optional
+// peer boundary. Demo and managed-runtime implementation remain checkout-only.
+const standalonePackageDigest = '6494c125594a72c1d097b445a2d8b84c21f1d5bce402d5f877ba0363e637d0eb';
+const standaloneLockDigest = '3c9e859312d7dbe8552469fb9c40131d492a32df3f2ac900fd79e08bd48a86b1';
 const recursiveRoots = ['risk-fork/src', 'risk-fork/e2b-template', 'risk-fork/ops/postgres', 'transaction-assurance/src'];
 const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -73,7 +73,7 @@ const shared = manifest.reviewed_sources.filter(({ path: name }) => (
   (name.startsWith('risk-fork/') && name !== 'risk-fork/package.json')
   || name === 'transaction-assurance/src/canonical.mjs'
 ));
-assert.equal(shared.length, 53, 'closed shared-source inventory');
+assert.equal(shared.length, 54, 'closed shared-source inventory');
 
 async function filesBelow(root, relative) {
   const filename = path.join(root, relative);
@@ -128,6 +128,10 @@ async function verifyStandalonePackage(root) {
   const lock = JSON.parse(lockBytes);
   assert.deepEqual(lock.packages[''].dependencies, pkg.dependencies);
   assert.equal(pkg.dependencies.pg, '8.23.1');
+  assert.equal(pkg.peerDependencies.e2b, '2.64.0');
+  assert.deepEqual(pkg.peerDependenciesMeta.e2b, { optional: true });
+  assert.deepEqual(lock.packages[''].peerDependencies, pkg.peerDependencies);
+  assert.deepEqual(lock.packages[''].peerDependenciesMeta, pkg.peerDependenciesMeta);
   assert.equal(lock.packages['node_modules/pg'].version, '8.23.1');
   const upstreamPackage = manifest.reviewed_sources.find((record) => record.path === 'risk-fork/package.json');
   assert.notEqual(`sha256:${hash(bytes)}`, upstreamPackage.sha256);
@@ -136,7 +140,17 @@ async function verifyStandalonePackage(root) {
 test('standalone shared sources match the pinned consumer; package closure remains divergent', async (t) => {
   await verifySharedSource(standalone);
   await verifyStandalonePackage(standalone);
-  t.diagnostic('53 shared files match. The standalone package/pg graph differs; full hosted closure, cutover and runtime qualification remain unproven.');
+  t.diagnostic('54 shared files match. The standalone package/pg graph differs; full hosted closure, cutover and runtime qualification remain unproven.');
+});
+
+test('historical E2B schema bytes retain their original qualification identities', async () => {
+  for (const [name, digest] of [
+    ['e2b-qualification-evidence.v1.json', 'd7b32b5799be9e0fd9ade54b88cbfd3f6b7e7bfcba2c464150d1642583b6a77f'],
+    ['e2b-qualification-evidence.v2.json', '37f018d1ad7f0226fb49da7d429a461feb25d1107eed487040d1f7280c92c332'],
+  ]) {
+    const bytes = await exactFile(standalone, `risk-fork/schema/${name}`);
+    assert.equal(hash(bytes), digest, `historical schema changed: ${name}`);
+  }
 });
 
 test('a lock-only dependency change requires renewed compatibility review', async (t) => {

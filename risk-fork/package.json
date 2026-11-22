@@ -131,7 +131,7 @@
     "pg": "8.23.1"
   },
   "peerDependencies": {
-    "e2b": "2.63.0"
+    "e2b": "2.64.0"
   },
   "peerDependenciesMeta": {
     "e2b": {
