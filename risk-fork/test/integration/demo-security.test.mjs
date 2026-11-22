@@ -8,8 +8,8 @@ import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 
 const checkout = process.env.RISK_FORK_UPSTREAM_CHECKOUT;
-if (!checkout || !path.isAbsolute(checkout)) throw new Error('Set RISK_FORK_UPSTREAM_CHECKOUT to an exact upstream 7063285e253f92ba18f71470878cef5653a82743 checkout');
-assert.equal(execFileSync('git', ['-C', checkout, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), '7063285e253f92ba18f71470878cef5653a82743', 'exact upstream checkout required');
+if (!checkout || !path.isAbsolute(checkout)) throw new Error('Set RISK_FORK_UPSTREAM_CHECKOUT to an exact upstream 74e186539222c3e6ee84590e067c8784fcbddd94 checkout');
+assert.equal(execFileSync('git', ['-C', checkout, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), '74e186539222c3e6ee84590e067c8784fcbddd94', 'exact upstream checkout required');
 execFileSync('git', ['-C', checkout, 'diff', '--quiet', 'HEAD', '--', 'risk-fork/src', 'risk-fork/hackathon/src/security.mjs']);
 const source = path.join(checkout, 'risk-fork/hackathon/src/security.mjs');
 assert.equal(createHash('sha256').update(await readFile(source)).digest('hex'), 'f17d610c83428cfa1411576465c5be499de9eae866318d4432bd70e043a9c933');

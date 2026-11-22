@@ -110,16 +110,31 @@ test('clean creation options are exact, immutable, and authority-free', () => {
   ]) {
     assert.equal(Object.getPrototypeOf(record), null);
   }
-  assert.equal('apiKey' in options, false);
-  assert.equal('accessToken' in options, false);
-  assert.throws(
-    () => buildE2BCleanSandboxCreateOptions({
-      timeoutMs: TIMEOUT_MS,
-      metadata: METADATA,
-      apiKey: 'not-permitted',
-    }),
-    /unsupported/,
-  );
+  // SDK 2.64 adds OAuth headers, custom shells and resizable templates.
+  // None of these caller-controlled capabilities belong in clean creation.
+  const refusedCapabilities = {
+    apiKey: 'not-permitted',
+    accessToken: 'not-permitted',
+    apiHeaders: {
+      Authorization: 'Bearer synthetic-not-permitted',
+      'X-Team-ID': 'synthetic-team-not-permitted',
+    },
+    shell: ['/bin/sh', '-c'],
+    cpuCount: 2,
+    maxCpuCount: 4,
+  };
+  for (const [key, value] of Object.entries(refusedCapabilities)) {
+    assert.equal(key in options, false, `${key} must not carry caller authority`);
+    assert.throws(
+      () => buildE2BCleanSandboxCreateOptions({
+        timeoutMs: TIMEOUT_MS,
+        metadata: METADATA,
+        [key]: value,
+      }),
+      /unsupported/,
+      `${key} must be refused before SDK use`,
+    );
+  }
   assert.throws(
     () => buildE2BCleanSandboxCreateOptions({
       timeoutMs: TIMEOUT_MS,
@@ -218,7 +233,10 @@ test('clean creation output cannot acquire inherited provider authority after co
     timeoutMs: TIMEOUT_MS,
     metadata: METADATA,
   });
-  const pollutedKeys = ['mcp', 'apiUrl', 'rules', 'maskRequestHost', 'toJSON'];
+  const pollutedKeys = [
+    'mcp', 'apiUrl', 'rules', 'maskRequestHost', 'toJSON',
+    'apiKey', 'accessToken', 'apiHeaders', 'shell', 'cpuCount', 'maxCpuCount',
+  ];
   const originals = new Map(pollutedKeys.map((key) => (
     [key, Object.getOwnPropertyDescriptor(Object.prototype, key)]
   )));
@@ -231,6 +249,9 @@ test('clean creation output cannot acquire inherited provider authority after co
     }
     assert.equal('mcp' in options, false);
     assert.equal('apiUrl' in options, false);
+    for (const key of ['apiKey', 'accessToken', 'apiHeaders', 'shell', 'cpuCount', 'maxCpuCount']) {
+      assert.equal(key in options, false, `${key} must not be inherited`);
+    }
     assert.equal('rules' in options.network, false);
     assert.equal('maskRequestHost' in options.network, false);
     assert.equal('toJSON' in options, false);
@@ -415,7 +436,7 @@ test('pinned E2B SDK preserves the clean request and observation contract over l
   assert.ok(requests[0].rawBody.includes(
     '"network":{"allowOut":[],"denyOut":["0.0.0.0/0"],"allowPublicTraffic":false}',
   ));
-  // e2b@2.63.0 omits an empty IAM input from the wire body. This exact SDK
+  // e2b@2.64.0 omits an empty IAM input from the wire body. This exact SDK
   // behavior is recorded here and is not treated as provider-side absence
   // proof; live credential-inheritance qualification remains external.
   assert.equal('iam' in requests[0].body, false);
