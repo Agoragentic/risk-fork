@@ -36,7 +36,7 @@ async function sha256(filename) {
   return `sha256:${createHash('sha256').update(await readFile(filename)).digest('hex')}`;
 }
 
-async function materializeUncontainedTestGate(temporaryRoot) {
+async function materializeUncontainedTestGate(temporaryRoot, { observeShutdown = false } = {}) {
   const target = path.join(temporaryRoot, 'one-tool-stdio-gate-test-only.mjs');
   const original = await readFile(gateEntrypoint, 'utf8');
   const replacements = [
@@ -53,6 +53,21 @@ async function materializeUncontainedTestGate(temporaryRoot) {
       'const KERNEL_DESCENDANT_CONTAINMENT_VERIFIED = true;',
     ],
   ];
+  if (observeShutdown) {
+    // Only the unpackaged fixture copy reports shutdown readiness on its own
+    // pipe. Gateway output cannot forge this signal or unblock client stdout.
+    replacements.push(
+      ['  readSync,', '  readSync,\n  writeSync,'],
+      [
+        '    }, SHUTDOWN_FORCE_EXIT_MS);',
+        `    }, SHUTDOWN_FORCE_EXIT_MS);
+    writeSync(3, JSON.stringify({
+      code, reason, clientOutputBackpressured,
+      forceExitMilliseconds: SHUTDOWN_FORCE_EXIT_MS,
+    }) + '\\n');`,
+      ],
+    );
+  }
   let source = original;
   for (const [needle, replacement] of replacements) {
     assert.equal(source.split(needle).length - 1, 1, `test gate expected one ${needle}`);
@@ -125,11 +140,13 @@ test('fixture PID readiness remains bounded and propagates non-missing-file erro
   }), (error) => error === unavailable);
 });
 
-async function startGate(fixtureName, { consumeOutput = true, ready = true } = {}) {
+async function startGate(fixtureName, {
+  consumeOutput = true, ready = true, observeShutdown = false,
+} = {}) {
   const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'risk-fork-client-gate-'));
   const gateway = path.join(temporaryRoot, 'risk-forkd.js');
   await copyFile(path.join(fixtureRoot, fixtureName), gateway);
-  const testGateEntrypoint = await materializeUncontainedTestGate(temporaryRoot);
+  const testGateEntrypoint = await materializeUncontainedTestGate(temporaryRoot, { observeShutdown });
   const child = spawn(process.execPath, [
     testGateEntrypoint,
     'serve',
@@ -137,9 +154,20 @@ async function startGate(fixtureName, { consumeOutput = true, ready = true } = {
     '--gateway-sha256', await sha256(gateway),
   ], {
     cwd: packageRoot,
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: observeShutdown ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
+  const shutdownEvents = observeShutdown ? createInterface({ input: child.stdio[3] }) : null;
+  const shutdownMessages = [];
+  const shutdownArmed = shutdownEvents
+    ? new Promise((resolve) => {
+      shutdownEvents.on('line', (line) => {
+        shutdownMessages.push(line);
+        resolve(line);
+      });
+      shutdownEvents.once('close', () => resolve(null));
+    })
+    : null;
   const pending = new Map();
   const messages = [];
   const stderr = [];
@@ -175,6 +203,7 @@ async function startGate(fixtureName, { consumeOutput = true, ready = true } = {
 
   async function cleanup() {
     output?.close();
+    shutdownEvents?.close();
     if (child.exitCode === null && !child.stdin.destroyed) child.stdin.end();
     if (child.exitCode === null) {
       const outcome = await withTimeout(exit, 2_000);
@@ -188,7 +217,7 @@ async function startGate(fixtureName, { consumeOutput = true, ready = true } = {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
   const session = {
-    child, cleanup, exit, gateway, messages, request, stderr, temporaryRoot,
+    child, cleanup, exit, gateway, messages, request, shutdownArmed, shutdownMessages, stderr, temporaryRoot,
   };
   if (ready) {
     try {
@@ -1483,16 +1512,34 @@ serveTest('stdio client gate bounds decoded JSON depth in both directions', asyn
 test('stdio client gate force-exits while client output remains blocked', {
   skip: process.platform === 'win32' ? 'POSIX pipe backpressure boundary' : false,
 }, async () => {
-  const session = await startGate('client-gateway-hostile-responses.js', { consumeOutput: false });
+  const session = await startGate('client-gateway-hostile-responses.js', {
+    consumeOutput: false, observeShutdown: true,
+  });
   try {
     session.child.stdin.write(`${JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
         name: 'risk_fork_protect', arguments: { operation: 'large' },
       },
     })}\n`);
+    // Processing the 900 KB response precedes shutdown and varies with CPU
+    // contention. Bound that readiness separately, then retain the shutdown
+    // deadline from the point where the real force-exit timer is armed.
+    const shutdown = await withTimeout(session.shutdownArmed, 2_500);
+    assert.notEqual(shutdown, null, 'blocked client output must arm bounded shutdown');
+    assert.ok(Buffer.byteLength(shutdown) <= 1024, 'shutdown readiness must remain a small marker');
+    assert.deepEqual(JSON.parse(shutdown), {
+      code: 78,
+      reason: 'Client output exceeded the client-gate backpressure limit',
+      clientOutputBackpressured: true,
+      forceExitMilliseconds: 1500,
+    });
+    assert.equal(session.child.stdout.isPaused(), true, 'client output must remain blocked');
     const outcome = await withTimeout(session.exit, 2_500);
     assert.notEqual(outcome, null, 'blocked client output must not keep the gate alive');
     assert.equal(outcome.code, 78);
+    assert.equal(session.child.exitCode, 78);
+    assert.equal(session.child.signalCode, null);
+    assert.deepEqual(session.shutdownMessages, [shutdown], 'shutdown must report readiness exactly once');
     assert.doesNotMatch(session.stderr.join(''), /uncaught|node:internal/i);
   } finally {
     await session.cleanup();
